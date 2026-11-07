@@ -84,6 +84,35 @@ def main():
             keys.extend(k.name for k in obj.data.shape_keys.key_blocks)
     manifest["shape_keys"] = sorted(set(keys))
 
+    # --- geometry facts the executor must not hardcode -------------------------
+    from mathutils import Vector
+
+    lo = Vector((1e9, 1e9, 1e9))
+    hi = Vector((-1e9, -1e9, -1e9))
+    for obj in meshes:
+        mw = obj.matrix_world
+        for corner in obj.bound_box:
+            w = mw @ Vector(corner)
+            for k in range(3):
+                lo[k] = min(lo[k], w[k])
+                hi[k] = max(hi[k], w[k])
+    if lo.x <= hi.x:
+        extents = [hi[k] - lo[k] for k in range(3)]
+        longest = max(range(3), key=lambda k: extents[k])
+        manifest["up_axis"] = "XYZ"[longest] if manifest.get("up_axis") in (None, "", "auto") else manifest["up_axis"]
+        manifest["height_m"] = round(extents[longest], 4)
+        manifest["origin_height"] = round(lo[longest], 4)
+        if longest != 2:
+            manifest["notes"] = (
+                (manifest.get("notes") or "").split(" | auto:")[0]
+                + " | auto: longest extent is %s not Z — model may be Y-up, check orientation"
+                % "XYZ"[longest]
+            )
+        else:
+            manifest["notes"] = (manifest.get("notes") or "").split(" | auto:")[0]
+
+    manifest.setdefault("shape_key_edit", True)
+
     hair = manifest.setdefault("hair", {})
     hair.setdefault("head_bone", "head")
     hair.setdefault("forward_axis", "-Y")

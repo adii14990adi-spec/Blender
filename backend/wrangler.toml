@@ -21,13 +21,26 @@ CDN_BASE = "https://cdn.jsdelivr.net/gh/yourname/game-assets" # jsDelivr (CORS e
 ALLOWED_ASSETS = "female_base_v3"                            # comma separated whitelist
 ALLOWED_ORIGINS = "*"                                        # or "https://yourname.github.io"
 
-# Confirm these against https://console.groq.com/docs/models before you deploy.
-VISION_MODEL = "qwen/qwen3.8-27b"                            # primary: image + text -> ops JSON
-VISION_FALLBACK_MODEL = "qwen/qwen3.6-27b"                   # multimodal fallback (Scout is retiring)
+# Model IDs — verified against https://console.groq.com/docs/models on 2026-11-07.
+#   qwen/qwen3.8-27b   Preview · INPUT: "Text, images" · vision + JSON object mode
+#                      · max 3 images · 2048 tokens per image
+#   openai/gpt-oss-120b Production · text only (validator; never put it in VISION_MODELS)
+# Ordered, comma separated. The Worker checks this list against GET /openai/v1/models on every
+# cold start, skips IDs that are not on your account, and permanently (24 h) demotes any model
+# that rejects image_url to "text" so a text-only model can never become primary.
+# Verify the chain from a phone with:  curl https://<worker>/models?probe=1
+VISION_MODELS = "qwen/qwen3.8-27b"
 VALIDATOR_MODEL = "openai/gpt-oss-120b"                      # text-only second pass
 ENABLE_VALIDATOR = "false"                                   # "true" to spend a second Groq call
+GROQ_REASONING_EFFORT = "none"                               # Qwen thinking mode off: fewer tokens, cleaner JSON ("" to disable)
 
-# KV: rate limiting (20/h per IP, 200/day global) + ops_spec/manifest cache.
+# NOTE on CPU: the Workers *free* plan allows ~10 ms CPU per request. This Worker spends its time
+# waiting on Groq/GitHub (wall-clock, not CPU), so a 512 px reference stays comfortably inside the
+# limit — but if you raise the image size, add the validator pass, or hit [1102], move to Workers
+# Paid ($5/mo, 30 s CPU) before reaching for the "thin mode" refactor described in README §12.
+#
+# KV: rate limiting (20/h per IP, 200/day global) + ops_spec/manifest fallback cache + model
+# availability/capability cache.
 # Create it with:  npx wrangler kv namespace create RATE_KV
 [[kv_namespaces]]
 binding = "RATE_KV"

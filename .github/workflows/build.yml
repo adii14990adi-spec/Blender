@@ -15,8 +15,9 @@ on:
 permissions:
   contents: write # commit the output to the `assets` branch
 
+# Builds run per-job in parallel. Publishing is serialised separately (job-level
+# concurrency `assets-publish`) because every build pushes to the same branch.
 concurrency:
-  # one build per job id; different jobs may run in parallel
   group: build-asset-${{ github.event.client_payload.job_id || github.event.inputs.job_id || 'sample' }}
   cancel-in-progress: false
 
@@ -25,6 +26,8 @@ env:
   BLENDER_VERSION: "4.2.3"
   BLENDER_DIR: "blender-4.2.3-linux-x64"
   ASSETS_BRANCH: "assets"
+  # jsDelivr hard limit — larger GLBs are published but served from a different host
+  JSDELIVR_MAX_BYTES: "20971520"
 
 jobs:
   build:
@@ -128,27 +131,167 @@ jobs:
           fi
 
           APPLIED=$(python3 -c 'import json;print(len(json.load(open("/tmp/result.json")).get("applied") or []))')
-          ERRORS=$(python3 -c 'import json;print(len(json.load(open("/tmp/result.json")).get("errors") or []))')
+          OK=$(python3 -c 'import json;print("1" if json.load(open("/tmp/result.json")).get("ok") else "0")')
           echo "applied=$APPLIED" >> "$GITHUB_OUTPUT"
-          echo "errors=$ERRORS" >> "$GITHUB_OUTPUT"
+          echo "worker_ok=$OK" >> "$GITHUB_OUTPUT"
 
           echo "--- result ---"
           python3 -m json.tool /tmp/result.json || true
 
-          if [ "$APPLIED" -eq 0 ]; then
-            echo "::error::no ops were applied — see errors above"
+          if [ "$OK" != "1" ]; then
+            echo "::error::worker failed (applied=$APPLIED, exit=$RC) — see errors above"
             exit 1
           fi
           if [ "$RC" -eq 3 ]; then
-            echo "::error::worker hit its 120s self-timeout"
+            echo "::error::worker hit its watchdog timeout"
             exit 1
           fi
 
-      - name: Publish to ${{ env.ASSETS_BRANCH }} branch
+      - name: Validate GLB container
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/out.glb ]; then
+            echo "::error::/tmp/out.glb missing — nothing to publish"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os, struct, sys
+
+          path = "/tmp/out.glb"
+          size = os.path.getsize(path)
+          with open(path, "rb") as fh:
+              header = fh.read(12)
+          if len(header) < 12:
+              sys.exit("::error::GLB header truncated")
+          magic, version, length = struct.unpack("<4sII", header)
+          if magic != b"glTF":
+              sys.exit("::error::bad GLB magic %r" % magic)
+          if version != 2:
+              sys.exit("::error::unsupported glTF version %d" % version)
+          if length != size:
+              sys.exit("::error::GLB length field %d != file size %d (truncated export)" % (length, size))
+          if size < 1024:
+              sys.exit("::error::GLB is suspiciously small (%d bytes)" % size)
+          limit = int(os.environ.get("JSDELIVR_MAX_BYTES", "20971520"))
+          if size > limit:
+              print("::warning file=/tmp/out.glb::%.1f MB exceeds jsDelivr's 20 MB limit — "
+                    "served from statically.io instead; move outputs to R2 for real traffic"
+                    % (size / 1048576))
+          print("glb ok · %d bytes" % size)
+          with open("/tmp/glb_size", "w") as fh:
+              fh.write(str(size))
+          PY
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glb-${{ steps.job.outputs.job_id }}
+          path: /tmp/out.glb
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Job summary
+        if: always()
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+          ASSET: ${{ steps.job.outputs.asset_id }}
+          REPO: ${{ github.repository }}
+          SIZE: ${{ steps.run.outputs.size }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          job = os.environ.get("JOB", "?")
+          repo = os.environ.get("REPO", "owner/repo")
+          try:
+              size = open("/tmp/glb_size").read().strip()
+          except Exception:
+              size = "0"
+          try:
+              r = json.load(open("/tmp/result.json"))
+          except Exception:
+              r = {"applied": [], "errors": [{"error": "no result"}], "warnings": []}
+
+          lines = ["## build-asset — `%s`" % job, "", "| field | value |", "| --- | --- |"]
+          lines.append("| asset | `%s` |" % os.environ.get("ASSET", "?"))
+          lines.append("| worker ok | %s |" % ("✅" if r.get("ok") else "❌"))
+          lines.append("| applied | %d |" % len(r.get("applied") or []))
+          lines.append("| errors | %d |" % len(r.get("errors") or []))
+          lines.append("| glb bytes | %s |" % size)
+          lines.append("| seconds | %s |" % r.get("seconds", "?"))
+          if r.get("license"):
+              lines.append("| license | `%s` |" % r["license"])
+          lines += ["", "**CDN**", "```",
+                    "https://cdn.jsdelivr.net/gh/%s@assets/out_%s.glb" % (repo, job), "```"]
+
+          applied = r.get("applied") or []
+          if applied:
+              lines.append("**Applied**")
+              for a in applied:
+                  lines.append("- `%s` — `%s`" % (a.get("op"), json.dumps(a.get("result"), ensure_ascii=False)[:300]))
+          if r.get("errors"):
+              lines.append("**Errors**")
+              for e in r["errors"]:
+                  lines.append("- `%s` — %s" % (e.get("op"), e.get("error")))
+          if r.get("warnings"):
+              lines.append("**Warnings**")
+              for w in r["warnings"]:
+                  lines.append("- %s" % w)
+          print("\n".join(lines))
+          PY
+
+  publish:
+    name: publish → ${{ env.ASSETS_BRANCH }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Every build pushes to the same branch. Serialising only the publish job keeps
+    # builds parallel while making "git push" races impossible.
+    concurrency:
+      group: assets-publish
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve job id
+        id: job
+        env:
+          RAW_JOB: ${{ github.event.client_payload.job_id || github.event.inputs.job_id || 'sample' }}
+        run: echo "job_id=$RAW_JOB" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: glb-${{ steps.job.outputs.job_id }}
+          path: /tmp/artifact
+
+      - name: Validate GLB again (defence in depth)
+        run: |
+          set -euo pipefail
+          SRC=/tmp/artifact/out.glb
+          test -f "$SRC"
+          python3 - "$SRC" <<'PY'
+          import os, struct, sys
+          path = sys.argv[1]
+          size = os.path.getsize(path)
+          with open(path, "rb") as fh:
+              magic, version, length = struct.unpack("<4sII", fh.read(12))
+          assert magic == b"glTF", magic
+          assert version == 2, version
+          assert length == size, (length, size)
+          print("artifact glb ok · %d bytes" % size)
+          PY
+
+      - name: Push to ${{ env.ASSETS_BRANCH }} (rebase + retry)
         id: publish
         env:
           JOB: ${{ steps.job.outputs.job_id }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -157,7 +300,6 @@ jobs:
           WORKTREE=/tmp/assets-tree
           rm -rf "$WORKTREE"
           git fetch --depth 1 origin "${ASSETS_BRANCH}" 2>/dev/null || true
-
           if git rev-parse --verify --quiet "refs/remotes/origin/${ASSETS_BRANCH}" >/dev/null; then
             git worktree add --detach "$WORKTREE" "origin/${ASSETS_BRANCH}"
           else
@@ -171,17 +313,41 @@ jobs:
             )
           fi
 
-          cp /tmp/out.glb "$WORKTREE/out_${JOB}.glb"
+          cp /tmp/artifact/out.glb "$WORKTREE/out_${JOB}.glb"
           cd "$WORKTREE"
           git add -A
+
+          # idempotency: republishing an identical artifact is a success, not a failure
+          if git diff --cached --quiet; then
+            echo "nothing to publish — identical out_${JOB}.glb already on ${ASSETS_BRANCH}"
+            echo "size=$(stat -c%s "out_${JOB}.glb")" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git commit -m "asset: out_${JOB}.glb (job ${JOB})"
-          git push origin "HEAD:${ASSETS_BRANCH}"
+
+          pushed=0
+          for attempt in 1 2 3 4; do
+            if git push origin "HEAD:${ASSETS_BRANCH}"; then
+              pushed=1
+              break
+            fi
+            echo "push rejected (attempt $attempt) — rebasing on origin/${ASSETS_BRANCH}"
+            git fetch origin "${ASSETS_BRANCH}"
+            git rebase "origin/${ASSETS_BRANCH}" || { git rebase --abort || true; sleep $((attempt * 3)); continue; }
+            sleep $((attempt * 3))
+          done
+          if [ "$pushed" -ne 1 ]; then
+            echo "::error::could not publish after 4 attempts — branch is contended"
+            exit 1
+          fi
+
           SIZE=$(stat -c%s "out_${JOB}.glb")
           echo "size=$SIZE" >> "$GITHUB_OUTPUT"
           echo "pushed out_${JOB}.glb (${SIZE} bytes)"
 
       - name: Purge jsDelivr cache (best effort)
-        if: always() && steps.publish.outcome == 'success'
+        if: steps.publish.outcome == 'success'
         env:
           JOB: ${{ steps.job.outputs.job_id }}
           REPO: ${{ github.repository }}
@@ -189,60 +355,28 @@ jobs:
           curl -fsS "https://purge.jsdelivr.net/gh/${REPO}@${ASSETS_BRANCH}/out_${JOB}.glb" >/dev/null || true
           curl -fsS "https://purge.jsdelivr.net/gh/${REPO}@${ASSETS_BRANCH}/" >/dev/null || true
 
-      - name: Job summary
+      - name: Publish summary
         if: always()
         env:
           JOB: ${{ steps.job.outputs.job_id }}
-          ASSET: ${{ steps.job.outputs.asset_id }}
           REPO: ${{ github.repository }}
           PUBLISHED: ${{ steps.publish.outcome }}
           SIZE: ${{ steps.publish.outputs.size }}
         run: |
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, os
-
-          job = os.environ.get("JOB", "?")
-          repo = os.environ.get("REPO", "owner/repo")
-          published = os.environ.get("PUBLISHED") == "success"
-          size = os.environ.get("SIZE") or "0"
-          try:
-              r = json.load(open("/tmp/result.json"))
-          except Exception:
-              r = {"applied": [], "errors": [{"error": "no result"}], "warnings": []}
-
-          lines = []
-          lines.append("## build-asset — `%s`" % job)
-          lines.append("")
-          lines.append("| field | value |")
-          lines.append("| --- | --- |")
-          lines.append("| asset | `%s` |" % os.environ.get("ASSET", "?"))
-          lines.append("| worker ok | %s |" % ("✅" if r.get("ok") else "❌"))
-          lines.append("| applied | %d |" % len(r.get("applied") or []))
-          lines.append("| errors | %d |" % len(r.get("errors") or []))
-          lines.append("| output | %s |" % ("`out_%s.glb` (%s bytes)" % (job, size) if published else "not published"))
-          lines.append("| seconds | %s |" % r.get("seconds", "?"))
-          if r.get("license"):
-              lines.append("| license | `%s` |" % r["license"])
-          lines.append("")
-          lines.append("**CDN**")
-          lines.append("```")
-          lines.append("https://cdn.jsdelivr.net/gh/%s@assets/out_%s.glb" % (repo, job))
-          lines.append("```")
-
-          applied = r.get("applied") or []
-          if applied:
-              lines.append("**Applied**")
-              for a in applied:
-                  lines.append("- `%s` — `%s`" % (a.get("op"), json.dumps(a.get("result"), ensure_ascii=False)[:300]))
-          errors = r.get("errors") or []
-          if errors:
-              lines.append("**Errors**")
-              for e in errors:
-                  lines.append("- `%s` — %s" % (e.get("op"), e.get("error")))
-          warnings = r.get("warnings") or []
-          if warnings:
-              lines.append("**Warnings**")
-              for w in warnings:
-                  lines.append("- %s" % w)
-          print("\n".join(lines))
-          PY
+          SIZE_MB=$(python3 -c "print(round(int('${SIZE:-0}')/1048576, 1))")
+          {
+            echo "## publish — \`${JOB}\`"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| status | ${PUBLISHED} |"
+            echo "| bytes | ${SIZE:-0} (${SIZE_MB} MB) |"
+            echo "| jsDelivr limit | 20 MB — larger files are served from statically.io |"
+            echo
+            echo "**URLs**"
+            echo '```'
+            echo "https://cdn.jsdelivr.net/gh/${REPO}@${ASSETS_BRANCH}/out_${JOB}.glb"
+            echo "https://cdn.statically.io/gh/${REPO}/${ASSETS_BRANCH}/out_${JOB}.glb"
+            echo "https://raw.githubusercontent.com/${REPO}/${ASSETS_BRANCH}/out_${JOB}.glb"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

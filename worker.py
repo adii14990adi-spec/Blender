@@ -14,17 +14,20 @@ Contract
 * Base assets are only ever read. The only write is the exported .glb.
 * Prints exactly one line of JSON as the last line of stdout, and optionally
   writes the same object to --result so CI does not have to scrape stdout.
-* Self-kills after 120 s via signal.alarm (Linux runner).
+* Self-kills after 120 s with a watchdog thread (not SIGALRM: an alarm mid-export
+  leaves a truncated GLB). The exporter writes <out>.part, the container header is
+  validated, and only then is the file atomically renamed into place.
 
-Exit codes: 0 = ok (or partial success), 1 = nothing applied / fatal, 3 = timeout.
+Exit codes: 0 = ok (or partial success), 1 = nothing applied / fatal, 3 = watchdog timeout.
 """
 
 import json
 import math
 import os
 import re
-import signal
+import struct
 import sys
+import threading
 import time
 import traceback
 
@@ -167,6 +170,7 @@ class Ctx(object):
         self.warnings = []
         self.created = []
         self.license = "unknown"
+        self._sk_warned = False
 
     def warn(self, msg):
         self.warnings.append(msg)
@@ -301,6 +305,28 @@ def transform_world(obj, fn):
     obj.data.update()
 
 
+def has_shape_keys(obj):
+    keys = getattr(obj.data, "shape_keys", None)
+    return bool(keys and len(keys.key_blocks) > 1)
+
+
+def _shape_key_guard(ctx, obj):
+    """Vertex edits move the basis of every shape key, so morph targets distort.
+
+    Manifest flag `shape_key_edit: false` turns vertex-editing ops into a skip instead.
+    """
+    if not has_shape_keys(obj):
+        return True
+    if ctx.manifest.get("shape_key_edit") is False:
+        ctx.warn("%s has shape keys and shape_key_edit=false — left untouched" % obj.name)
+        return False
+    if not ctx._sk_warned:
+        ctx._sk_warned = True
+        ctx.warn("meshes with shape keys were edited: morph targets follow the basis and may distort "
+                 "(set shape_key_edit:false in the manifest to skip them)")
+    return True
+
+
 def world_bounds(objects):
     lo = Vector((1e9, 1e9, 1e9))
     hi = Vector((-1e9, -1e9, -1e9))
@@ -361,6 +387,7 @@ def op_set_scale(ctx, op):
         if obj is None:
             raise ValueError("mesh %r not found in the base model" % target)
         objs = [obj]
+    objs = [o for o in objs if _shape_key_guard(ctx, o)]
     if not objs:
         raise ValueError("no target meshes")
 
@@ -385,6 +412,23 @@ def _band_weight(t, lo, hi, lateral=None, x_rel=0.0):
     return w
 
 
+def _up_index(ctx, metrics):
+    """Which world axis is 'up'? manifest.up_axis wins, otherwise the longest extent.
+
+    glTF import can leave a model Y-up (or centred on the hips instead of the feet), so
+    banding must never assume "Z, origin at the feet, 1.7 m tall".
+    """
+    declared = str(ctx.manifest.get("up_axis") or "auto").strip().upper()
+    if declared in ("X", "Y", "Z"):
+        return {"X": 0, "Y": 1, "Z": 2}[declared]
+    extents = metrics["max"] - metrics["min"]
+    idx = max(range(3), key=lambda k: extents[k])
+    if idx != 2:
+        ctx.warn("model is not Z-up (longest extent is %s) — banding along %s; "
+                 "set manifest.up_axis to pin it" % ("XYZ"[idx], "XYZ"[idx]))
+    return idx
+
+
 def op_proportion(ctx, op):
     """Smooth regional body scaling. The workhorse for silhouette changes."""
     part = str(op.get("part") or "").lower()
@@ -394,48 +438,55 @@ def op_proportion(ctx, op):
     height = clampf(op.get("height"), FACTOR_MIN, FACTOR_MAX, width)
     depth = clampf(op.get("depth"), FACTOR_MIN, FACTOR_MAX, width)
 
-    objs = list(ctx.body_meshes or ctx.meshes)
+    objs = [o for o in (ctx.body_meshes or ctx.meshes) if _shape_key_guard(ctx, o)]
     if not objs:
         raise ValueError("no meshes to modify")
 
     m = body_metrics(ctx)
-    z0, h = m["min"].z, m["height"]
+    up = _up_index(ctx, m)
+    lat = 0 if up != 0 else 1
+    v0 = m["min"][up]
+    h = max(1e-6, m["max"][up] - v0)
+    center = [(m["min"][k] + m["max"][k]) * 0.5 for k in range(3)]
+    half_lat = max(1e-6, (m["max"][lat] - m["min"][lat]) * 0.5)
+
     lo_t, hi_t = PART_BANDS[part]
     lateral = PART_LATERAL.get(part)
-    pivot_z = z0 + h * (lo_t + hi_t) * 0.5
-    cx, cy = m["center_x"], m["center_y"]
+    pivot = v0 + h * (lo_t + hi_t) * 0.5
 
-    touched = 0
+    axis_factor = {}
+    for k in range(3):
+        axis_factor[k] = height if k == up else (width if k == lat else depth)
+
+    def fn(w):
+        t = (w[up] - v0) / h
+        rel = abs(w[lat] - center[lat]) / half_lat
+        bw = _band_weight(t, lo_t, hi_t, lateral, rel)
+        if bw <= 0.0005:
+            return w
+        out = [w[0], w[1], w[2]]
+        for k in range(3):
+            f = 1.0 + (axis_factor[k] - 1.0) * bw
+            p = pivot if k == up else center[k]
+            out[k] = p + (out[k] - p) * f
+        return Vector(out)
+
     for obj in objs:
-        def fn(w, m=m, z0=z0, h=h, lo_t=lo_t, hi_t=hi_t, lateral=lateral,
-               cx=cx, cy=cy, pz=pivot_z, width=width, height=height, depth=depth):
-            t = (w.z - z0) / h
-            x_rel = abs(w.x - cx) / m["half_width"]
-            bw = _band_weight(t, lo_t, hi_t, lateral, x_rel)
-            if bw <= 0.0005:
-                return w
-            fx = 1.0 + (width - 1.0) * bw
-            fy = 1.0 + (depth - 1.0) * bw
-            fz = 1.0 + (height - 1.0) * bw
-            return Vector((cx + (w.x - cx) * fx,
-                           cy + (w.y - cy) * fy,
-                           pz + (w.z - pz) * fz))
-
         transform_world(obj, fn)
-        touched += 1
 
-    bone_moves = _mirror_bones_in_band(ctx, lo_t, hi_t, lateral, z0, h, cx, cy, pivot_z,
-                                       width, depth, height)
+    bone_moves = _mirror_bones_in_band(ctx, up, lat, axis_factor, center, pivot, v0, h,
+                                       lo_t, hi_t, lateral, half_lat)
     return {"part": part, "width": round(width, 4), "height": round(height, 4),
-            "depth": round(depth, 4), "meshes": len(objs), "bones": bone_moves}
+            "depth": round(depth, 4), "meshes": len(objs), "bones": bone_moves,
+            "up_axis": "XYZ"[up]}
 
 
-def _mirror_bones_in_band(ctx, lo_t, hi_t, lateral, z0, h, cx, cy, pivot_z, fx, fy, fz):
+def _mirror_bones_in_band(ctx, up, lat, axis_factor, center, pivot, v0, h,
+                          lo_t, hi_t, lateral, half_lat):
     """Keep the rig roughly aligned with the region we just scaled."""
     arm = ctx.armature
     if arm is None:
         return 0
-    half_w = max(1e-6, body_metrics(ctx)["half_width"])
     moved = 0
     try:
         ensure_active(arm)
@@ -444,23 +495,21 @@ def _mirror_bones_in_band(ctx, lo_t, hi_t, lateral, z0, h, cx, cy, pivot_z, fx, 
         inv = mw.inverted()
         for eb in arm.data.edit_bones:
             head_w = mw @ eb.head
-            t = (head_w.z - z0) / h
-            bw = _band_weight(t, lo_t, hi_t, lateral, abs(head_w.x - cx) / half_w)
+            t = (head_w[up] - v0) / h
+            bw = _band_weight(t, lo_t, hi_t, lateral, abs(head_w[lat] - center[lat]) / half_lat)
             if bw <= 0.0005:
                 continue
-            sx = 1.0 + (fx - 1.0) * bw
-            sy = 1.0 + (fy - 1.0) * bw
-            sz = 1.0 + (fz - 1.0) * bw
 
-            def xf(v):
-                return inv @ Vector((cx + (v.x - cx) * sx,
-                                     cy + (v.y - cy) * sy,
-                                     pivot_z + (v.z - pivot_z) * sz))
+            def xf(v, bw=bw):
+                out = [v[0], v[1], v[2]]
+                for k in range(3):
+                    f = 1.0 + (axis_factor[k] - 1.0) * bw
+                    p = pivot if k == up else center[k]
+                    out[k] = p + (out[k] - p) * f
+                return inv @ Vector(out)
 
-            head = xf(head_w)
-            tail = xf(mw @ eb.tail)
-            eb.head = head
-            eb.tail = tail
+            eb.head = xf(head_w)
+            eb.tail = xf(mw @ eb.tail)
             moved += 1
         bpy.ops.object.mode_set(mode="OBJECT")
     except Exception as exc:
@@ -492,6 +541,8 @@ def op_bone_resize(ctx, op):
     # 1) vertices weighted to those bones move with the bone
     moved_verts = 0
     for obj in (ctx.body_meshes or ctx.meshes):
+        if not _shape_key_guard(ctx, obj):
+            continue
         index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
         wanted = {vg.index for vg in obj.vertex_groups if vg.name in heads}
         if not wanted:
@@ -626,6 +677,28 @@ def srgb_to_linear_inv(c):
     return c * 12.92 if c <= 0.0031308 else 1.055 * (c ** (1 / 2.4)) - 0.055
 
 
+def _point_segment_distance(p, a, b):
+    ab = b - a
+    denom = ab.dot(ab) if hasattr(ab, "dot") else 0.0
+    if denom <= 1e-12:
+        return (p - a).length
+    t = max(0.0, min(1.0, (p - a).dot(ab) / denom))
+    return (p - (a + ab * t)).length
+
+
+def nearest_bone(arm, point_world):
+    """Closest bone segment to a world-space point (used to rigidly attach props)."""
+    best, best_d = None, float("inf")
+    mw = arm.matrix_world
+    for bone in arm.data.bones:
+        head = mw @ bone.head_local
+        tail = mw @ bone.tail_local
+        d = _point_segment_distance(point_world, head, tail)
+        if d < best_d:
+            best, best_d = bone, d
+    return best
+
+
 def op_add_mesh(ctx, op):
     prim = str(op.get("primitive") or "cube").lower()
     if prim not in PRIMITIVES:
@@ -680,14 +753,36 @@ def op_add_mesh(ctx, op):
             obj.data.materials.clear()
             obj.data.materials.append(mat)
 
-    if ctx.armature is not None:
-        obj.parent = ctx.armature
-        obj.matrix_parent_inverse = ctx.armature.matrix_world.inverted()
+    attach = str(op.get("attach_bone") or "auto").strip()
+    attached, bone_name = "none", None
+    if ctx.armature is not None and attach.lower() not in ("none", "off", "false", "no"):
+        bone = None
+        if attach.lower() in ("auto", "nearest", ""):
+            bone = nearest_bone(ctx.armature, Vector(loc))
+        else:
+            bone = find_bone_data(ctx.armature, attach)
+            if bone is None:
+                ctx.warn("add_mesh %r: bone %r not found, using the nearest one" % (name, attach))
+                bone = nearest_bone(ctx.armature, Vector(loc))
+        world = obj.matrix_world.copy()
+        if bone is not None:
+            # rigid attach: the prop follows the bone through every pose and every export
+            obj.parent = ctx.armature
+            obj.parent_type = "BONE"
+            obj.parent_bone = bone.name
+            obj.matrix_world = world
+            attached, bone_name = "bone", bone.name
+        else:
+            obj.parent = ctx.armature
+            obj.parent_type = "OBJECT"
+            obj.matrix_parent_inverse = ctx.armature.matrix_world.inverted()
+            attached = "armature"
 
     ctx.created.append(obj)
     ctx.meshes.append(obj)
     return {"name": name, "primitive": prim, "loc": [round(v, 3) for v in loc],
-            "scale": [round(v, 3) for v in scale], "mat": mat.name if mat else None}
+            "scale": [round(v, 3) for v in scale], "mat": mat.name if mat else None,
+            "attached": attached, "bone": bone_name}
 
 
 def _hair_styles(ctx):
@@ -1014,18 +1109,45 @@ class TimeoutError_(Exception):
     pass
 
 
-def _on_alarm(signum, frame):
-    raise TimeoutError_("worker self-timeout after %ds" % SELF_TIMEOUT_S)
+TIMEOUT_EXIT_CODE = 3
 
 
-def setup_watchdog():
-    try:
-        signal.signal(signal.SIGALRM, _on_alarm)
-        signal.alarm(SELF_TIMEOUT_S)
-        return True
-    except Exception as exc:  # pragma: no cover - non-Unix
-        log("watchdog unavailable: %s" % exc)
-        return False
+def start_watchdog(seconds, result_path):
+    """Hard-stop after `seconds`, without SIGALRM.
+
+    signal.alarm can fire in the middle of the exporter, leaving a truncated GLB that the
+    workflow would happily publish. This watchdog writes a failure result and kills the
+    process; the exporter writes to <out>.part and only os.replace()s a validated file,
+    so a killed run can never leave a half-written out.glb behind.
+    """
+    stop = threading.Event()
+
+    def _watch():
+        if stop.wait(seconds):
+            return
+        payload = {
+            "ok": False,
+            "errors": [{"op": "__timeout__", "error": "watchdog: %.1fs exceeded" % seconds}],
+            "applied": [], "warnings": [], "output": None, "bytes": 0, "seconds": seconds,
+        }
+        line = json.dumps(payload, separators=(",", ":"))
+        try:
+            if result_path:
+                with open(result_path, "w", encoding="utf-8") as fh:
+                    fh.write(line)
+        except Exception:
+            pass
+        try:
+            print(line, flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(TIMEOUT_EXIT_CODE)
+
+    thread = threading.Thread(target=_watch, name="worker-watchdog", daemon=True)
+    thread.start()
+    return stop
 
 
 def reset_scene():
@@ -1034,6 +1156,25 @@ def reset_scene():
     except Exception:
         for obj in list(bpy.data.objects):
             bpy.data.objects.remove(obj, do_unlink=True)
+
+
+def validate_glb(path):
+    """Reject a truncated/corrupt GLB before it can reach the assets branch."""
+    size = os.path.getsize(path)
+    if size < 20:
+        raise RuntimeError("GLB is only %d bytes" % size)
+    with open(path, "rb") as fh:
+        header = fh.read(12)
+    if len(header) < 12:
+        raise RuntimeError("GLB header truncated")
+    magic, version, length = struct.unpack("<4sII", header)
+    if magic != b"glTF":
+        raise RuntimeError("bad GLB magic %r" % magic)
+    if version != 2:
+        raise RuntimeError("unsupported glTF version %d" % version)
+    if length != size:
+        raise RuntimeError("GLB length field %d != file size %d" % (length, size))
+    return size
 
 
 def export_glb(path):
@@ -1053,6 +1194,19 @@ def export_glb(path):
     except TypeError:
         # older/newer exporters reject unknown kwargs
         bpy.ops.export_scene.gltf(filepath=path, export_format="GLB")
+
+
+def export_glb_atomic(final_path):
+    """Export to <final>.part, validate the container, then atomically publish it."""
+    part = final_path + ".part"
+    if os.path.exists(part):
+        os.remove(part)
+    export_glb(part)
+    if not os.path.isfile(part):
+        raise RuntimeError("exporter produced no file")
+    size = validate_glb(part)
+    os.replace(part, final_path)
+    return size
 
 
 def emit(result, result_path):
@@ -1080,7 +1234,8 @@ def main():
         "seconds": 0.0,
     }
 
-    watchdog = setup_watchdog()
+    watchdog = start_watchdog(SELF_TIMEOUT_S, result_path)
+    deadline = START_TS + SELF_TIMEOUT_S - 12
 
     try:
         if not job_path or not os.path.isfile(job_path):
@@ -1140,6 +1295,9 @@ def main():
             ops = ops[:MAX_OPS]
 
         for index, op in enumerate(ops):
+            if time.time() > deadline:
+                ctx.warn("soft deadline hit after %d ops — stopping before the watchdog fires" % index)
+                break
             name = (op or {}).get("op") if isinstance(op, dict) else None
             if not isinstance(op, dict):
                 result["errors"].append({"op": "op[%d]" % index, "error": "not an object"})
@@ -1160,7 +1318,7 @@ def main():
                 result["errors"].append({"index": index, "op": name, "error": "%s" % exc})
                 log("FAILED %s: %s\n%s" % (name, exc, traceback.format_exc(limit=3)))
 
-        result["warnings"] = ctx.warnings
+        result["warnings"] = [w for w in dict.fromkeys(ctx.warnings)]
         result["scene"] = {
             "meshes": len(ctx.meshes),
             "armature": ctx.armature.name if ctx.armature else None,
@@ -1168,7 +1326,11 @@ def main():
         }
 
         if not result["applied"]:
-            return finish(result, result_path, 1)
+            if ops:
+                # every op failed or was unknown — nothing worth shipping
+                return finish(result, result_path, 1)
+            ctx.warn("job contained no ops — exporting an unmodified copy of the base")
+            result["warnings"] = [w for w in dict.fromkeys(ctx.warnings)]
 
         to_object_mode()
         try:
@@ -1177,12 +1339,16 @@ def main():
             pass
         os.makedirs(os.path.dirname(out_path) or "/tmp", exist_ok=True)
         t0 = time.time()
-        export_glb(out_path)
+        try:
+            size = export_glb_atomic(out_path)
+        except Exception as exc:
+            result["errors"].append({"op": "__export__", "error": "GLB validation failed: %s" % exc})
+            return finish(result, result_path, 1)
         if not os.path.isfile(out_path):
             result["errors"].append({"op": "__export__", "error": "exporter produced no file"})
             return finish(result, result_path, 1)
         result["output"] = out_path
-        result["bytes"] = os.path.getsize(out_path)
+        result["bytes"] = size
         log("exported %s (%.1f KB) in %.1fs" % (out_path, result["bytes"] / 1024.0, time.time() - t0))
         result["ok"] = True
         return finish(result, result_path, 0)
@@ -1195,11 +1361,10 @@ def main():
         log(traceback.format_exc())
         return finish(result, result_path, 1)
     finally:
-        if watchdog:
-            try:
-                signal.alarm(0)
-            except Exception:
-                pass
+        try:
+            watchdog.set()
+        except Exception:
+            pass
 
 
 def finish(result, result_path, code):

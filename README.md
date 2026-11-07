@@ -8,32 +8,34 @@ orphan `assets` branch → the web UI previews it in `<model-viewer>`.
 [browser]  image + prompt
     │  POST /generate
     ▼
-[Cloudflare Worker]  ── Groq (vision) ─► ops JSON ── sanitise/clamp ──► commit jobs/<id>.json
+[Cloudflare Worker]  ── Groq vision ─► ops JSON ── sanitise/clamp ──► commit jobs/<id>.json
     │                                                                        │ repository_dispatch
     │  GET /status/<id>                                                      ▼
     │                                                        [GitHub Actions · Blender 4.2 LTS]
-    │                                                             worker.py (120 s self-kill)
-    └──────────── ready + CDN url ◄──────────────── assets branch: out_<id>.glb (jsDelivr)
+    │                                                             worker.py (120 s watchdog)
+    │                                                             GLB header validated
+    └──────────── ready + commit-pinned CDN url ◄────── publish job (serialised) → assets branch
 ```
 
 No server to maintain, nothing to install on your phone, base assets are never modified.
 
 ---
 
-## Deploy checklist (in order)
+## Deploy checklist (this order — each step is independently verifiable)
 
-1. Create a **public** repo and upload this project (`main` branch).
-2. Upload `bases/female_base_v3/{model.gltf,model.bin,textures/}` and replace `bases/female_base_v3/LICENSE`.
-3. **Actions → populate-manifest → Run** with `female_base_v3` → commits real mesh/bone/material names.
-4. Create the fine-grained PAT: *Contents RW* + *Actions RW*, this repo only (§2).
-5. **Actions → build-asset → Run** with `sample` → confirms Blender + publish work before Groq is involved.
-6. Create the Groq key; verify the three model IDs against `console.groq.com/docs/models` (§5).
-7. `wrangler kv namespace create RATE_KV` → paste id into `backend/wrangler.toml`.
-8. `wrangler secret put GROQ_API_KEY` and `wrangler secret put GH_PAT`; edit `[vars]` (`REPO`, `CDN_BASE`, `ALLOWED_ASSETS`).
-9. `wrangler deploy` → `curl https://<worker>/health` must return `ok:true`.
-10. Settings → Pages → `main` / `/web` → open `https://<you>.github.io/<repo>/`.
-11. In the UI: paste the Worker URL → Save → upload an image → Generate → wait for the `<model-viewer>` preview.
-12. Run through §10 (security checklist) once, then set `ALLOWED_ORIGINS` to your Pages origin instead of `*`.
+| # | Do this | Prove it worked |
+| --- | --- | --- |
+| 1 | Push base model + textures + `LICENSE`; run **Actions → populate-manifest** | `bases/<id>/manifest.json` shows real bones/materials, `up_axis`, `height_m` |
+| 2 | Create the `assets` orphan branch (or let the first build create it) | `git ls-remote origin assets` |
+| 3 | **Actions → build-asset → sample** (Groq untouched) | run is green, `out_sample.glb` opens in `<model-viewer>` |
+| 4 | Run `tools/groq_preflight.py` (§5) | at least one model says `VISION OK` |
+| 5 | `wrangler deploy`, then `curl /health?models=1` and `/models?probe=1` | chain listed, no model in `missing_from_account` |
+| 6 | One real job from a 512 px image | `/status/<id>` → `ready:true`, GLB downloads |
+| 7 | Two jobs at once | both publish, no non-fast-forward failure |
+| 8 | Enable Pages, run the whole flow in mobile Chrome | preview renders on the phone |
+
+Steps 1–3 are pure Blender/publish — **do not touch Groq before step 3 is green**, otherwise a red run
+tells you nothing about which half is broken.
 
 ---
 
@@ -41,40 +43,34 @@ No server to maintain, nothing to install on your phone, base assets are never m
 
 | Thing | Cost | Phone-friendly? |
 | --- | --- | --- |
-| GitHub account + public repo | free | yes (web / GitHub mobile) |
-| Groq API key | free tier | yes (console.groq.com in Chrome) |
-| Cloudflare account + Workers | free tier | yes (dash) or Termux/Cloud Shell for `wrangler` |
+| GitHub account + public repo | free | yes |
+| Groq API key | free tier | yes |
+| Cloudflare Workers | free (10 ms CPU) or $5/mo (30 s CPU) | yes — Termux / Cloud Shell / dash |
 | GitHub Pages | free | yes |
 | Blender | — | runs on GitHub's runner, you never install it |
 
-**Time to first `.glb`: ~25 minutes**, most of it waiting for GitHub to install Blender once (then it is cached).
+Public repo is required: jsDelivr + Pages + `raw.githubusercontent.com` all need it, and the Worker reads
+`ops_spec.md` / `manifest.json` unauthenticated.
 
 ---
 
-## 1. Create the repo and upload the base model
-
-1. Create a **public** repo, e.g. `game-assets` (public = jsDelivr CDN + GitHub Pages for free).
-2. Upload this project's files. On a phone the easiest path is **Add file → Upload files** in the GitHub
-   web UI (it accepts drag/drop from the Files app), or `git` in Termux.
-3. Put the base character in:
+## 1. Base model
 
 ```
 bases/female_base_v3/
-├─ model.gltf
+├─ model.gltf          # must reference model.bin by RELATIVE path
 ├─ model.bin
-├─ textures/albedo.png        # any number of textures
-├─ LICENSE                    # REQUIRED — see step 1b
-└─ manifest.json              # bone/mesh/material names (step 3)
+├─ textures/*
+├─ LICENSE             # required, machine readable
+└─ manifest.json       # names + geometry facts (step 1b)
 ```
 
-> The `.gltf` must reference `model.bin` by a **relative** path. If it says
-> `"uri": "file:///C:/Users/..."` or an absolute URL, fix it: `"uri": "model.bin"`.
-> Exporting from Blender with **File → Export → glTF 2.0 → Format: glTF Separate** does the right thing.
-> Keep total base size small (< 20 MB) so `git` on a phone stays sane.
+If `model.gltf` says `"uri": "file:///C:/Users/..."`, fix it to `"uri": "model.bin"`.
+Export from Blender with **glTF 2.0 → Format: glTF Separate**. Keep it under ~20 MB.
 
-### 1b. License tracking (do not skip)
+### 1b. License + manifest
 
-Every base asset needs `bases/<id>/LICENSE` in this exact machine-readable shape:
+`bases/<id>/LICENSE`:
 
 ```
 commercial: true
@@ -82,173 +78,168 @@ source: https://example.com/character-pack
 author: Some Artist
 license: CC-BY-4.0
 attribution: "Character base by Some Artist, CC-BY-4.0"
-notes: redistributed unmodified
 ```
 
-`commercial: false` assets are still buildable locally, but you must not ship their outputs.
-Reference images you upload are treated as **user-provided — the user is responsible** for having the
-rights to them; the Worker records that fact in every job file.
+`worker.py` reads the first line, echoes it in every build result and warns the UI when it is `false`.
+Outputs of a non-commercial base must not ship. Reference images are logged per job as
+`user-provided — user is responsible`.
+
+Then **Actions → populate-manifest → Run**. It fills `meshes`, `bones`, `materials`, `shape_keys`,
+`hair.meshes`, plus the geometry facts the executor refuses to hardcode:
+
+| field | meaning |
+| --- | --- |
+| `up_axis` | `auto` → detected from the bounding box; pin to `X`/`Y`/`Z` if the model is Y-up/lying down |
+| `height_m` | longest extent, used to sanity-check banding |
+| `origin_height` | where the origin sits along the up axis (feet ≠ 0 for some rigs) |
+| `shape_key_edit` | `false` → vertex ops skip meshes with blend shapes instead of distorting them |
+
+No armature? Set `"skinning": false`, leave `bones: []`. `bone_resize` then no-ops with a warning and
+`add_mesh` parents to the armature object instead of a bone. Everything else still works.
 
 ---
 
-## 2. Create the fine-grained GitHub PAT
+## 2. Fine-grained GitHub PAT
 
-GitHub → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
+Settings → Developer settings → Personal access tokens → **Fine-grained** → Generate:
 
-* **Repository access:** Only select repositories → `game-assets`
-* **Permissions:**
-  * *Contents* → **Read and write** (commit job files)
-  * *Actions* → **Read and write** (trigger the workflow)
-  * *Metadata* → Read-only (auto)
-* **Expiration:** 90 days (calendar reminder)
-
-Copy the `github_pat_…` value — it goes into the Worker as `GH_PAT` in step 6. Never commit it.
+* Repository access: **Only select repositories** → this repo
+* Permissions: **Contents: Read and write**, **Actions: Read and write** (Metadata is automatic)
+* Expiry: 90 days
 
 ---
 
-## 3. Fill the manifest (one-shot Action)
+## 3. Orphan `assets` branch
 
-`bases/female_base_v3/manifest.json` ships as a skeleton. It tells the LLM and the executor which
-**exact** mesh/bone/material names exist. If you already know them, just type them in. If not:
-
-1. **Actions → populate-manifest → Run workflow**
-2. `asset_id`: `female_base_v3` → Run.
-3. The action imports your `.gltf` in Blender, dumps real names, and commits `manifest.json` back to `main`.
-
-Verify by opening `bases/female_base_v3/manifest.json`. You should see arrays of names like
-`["Body", "Hair_Long", "Armor_Chest"]`. Optionally prune entries you don't want the AI to touch, then
-re-run **nothing** — the manifest is read fresh at build time.
-
-> If your base is a **static mesh with no armature**, leave `"armature": ""`, `"bones": []`, and set
-> `"skinning": false`. `worker.py` then skips all rig work (`bone_resize` becomes a no-op warning) and
-> only does vertex/material/mesh ops. Do not set `skinning: true` on a rig-less model — the export will
-> still work but the GLB will have no skeleton.
-
----
-
-## 4. Create the orphan `assets` branch
-
-Outputs live on a branch that has **no shared history with `main`**, so `main` stays small and CDN
-serving stays clean.
-
-Easiest — let the pipeline do it: the first successful build auto-creates the branch (the workflow
-handles "branch does not exist"). If you want it up front, from Termux / Cloud Shell:
+First build creates it automatically. Manually:
 
 ```bash
 git clone https://github.com/<you>/game-assets && cd game-assets
-git checkout --orphan assets
-git rm -rf .            # keep the folder empty
-echo "# generated GLBs" > README.md
-git add README.md && git commit -m "init assets branch"
-git push origin assets
+git checkout --orphan assets && git rm -rf . && echo "# generated GLBs" > README.md
+git add . && git commit -m "init assets" && git push origin assets
 ```
 
-Never put source assets on `assets` — remember it has no `main` files.
+Outputs are `out_<job_id>.glb`, never overwritten, never on `main`.
 
 ---
 
-## 5. Groq: key + model IDs
+## 4. Test the Blender pipeline (no Groq)
 
-1. console.groq.com → **API Keys** → create → copy `gsk_…`.
-2. **Confirm the model IDs before deploying.** They change; the defaults in `backend/wrangler.toml` are:
+**Actions → build-asset → Run workflow → `sample`**. `jobs/sample.json` applies three safe ops.
 
-| Role | Default model ID | Notes |
-| --- | --- | --- |
-| vision primary | `qwen/qwen3.8-27b` | image + text → ops JSON |
-| vision fallback | `qwen/qwen3.6-27b` | used when the primary errors or returns non-JSON |
-| JSON validator (optional) | `openai/gpt-oss-120b` | text-only second pass, `ENABLE_VALIDATOR="true"` |
-| upgrade path | `meta-models/muse-spark-open` | needs a Groq access request |
-
-Check them (Termux or any shell):
-
-```bash
-curl -s https://api.groq.com/openai/v1/models \
-  -H "Authorization: Bearer $GROQ_API_KEY" | grep -o '"id":"[^"]*"' | sort
-```
-
-If an ID is missing, change **only** `backend/wrangler.toml` `[vars]` (or `wrangler secret put` /
-dash var) — model IDs are read from env everywhere, never from code.
+Green run ⇒ `applied: 3`, `glb ok · N bytes`, and `assets` gains `out_sample.glb`. If this is red, the
+problem is Blender/publish, not the LLM.
 
 ---
 
-## 6. Deploy the Cloudflare Worker
+## 5. Groq: verify the models before trusting them
 
-The Worker is the only dynamic endpoint. Three ways, pick one:
+This is the step that silently kills deployments. Docs listings and reality drift apart, and a model
+that exists can still refuse images.
 
-**A. Termux (phone, recommended if you already use it)**
+**Current state, checked against `console.groq.com/docs/models` on 2026-11-07:**
+
+| model id | tier | input | verdict |
+| --- | --- | --- | --- |
+| `qwen/qwen3.8-27b` | Preview | **Text, images** (vision + JSON object mode, ≤3 images, 2048 tok/image) | primary ✅ |
+| `openai/gpt-oss-120b` | Production | text only | validator only — never in `VISION_MODELS` |
+| `qwen/qwen3.6-27b` | — | not in the lineup | ❌ don't configure it |
+| `meta-llama/llama-4-scout-17b-16e-instruct` | — | retired | ❌ |
+
+Re-check before every deploy:
 
 ```bash
-pkg install nodejs-lts git
+export GROQ_API_KEY=gsk_...
+python3 tools/groq_preflight.py            # both checks, stdlib only, works in Termux
+```
+
+It does exactly this per candidate:
+
+```bash
+# 1. does the id exist on YOUR account?
+curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY" \
+  | python3 -c "import json,sys;print('\n'.join(m['id'] for m in json.load(sys.stdin)['data']))"
+
+# 2. does it actually take image_url? (a 400 "does not support" means it is dead for this pipeline)
+curl -s https://api.groq.com/openai/v1/chat/completions -H "Authorization: Bearer $GROQ_API_KEY" \
+  -H "Content-Type: application/json" -d '{"model":"qwen/qwen3.8-27b","max_tokens":8,
+  "messages":[{"role":"user","content":[{"type":"text","text":"ok"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}]}]}'
+```
+
+Put the winners in `backend/wrangler.toml` → `VISION_MODELS` (ordered CSV). After deploying you can also
+ask the Worker itself:
+
+```bash
+curl https://<worker>/health?models=1     # chain vs. what your account actually has
+curl https://<worker>/models?probe=1      # live image probe per model
+```
+
+**The Worker defends itself either way:** it filters `VISION_MODELS` against `/openai/v1/models`, and any
+model that answers an image request with `400 … image … not supported` is demoted to `text` for 24 h and
+never retried as primary. If every configured model is dead you get a clean `502 no_vision_model` instead
+of a mystery 404.
+
+---
+
+## 6. Deploy the Worker
+
+```bash
+pkg install nodejs-lts git          # Termux; on Cloud Shell just install node 20+
 npm i -g wrangler
 cd backend
-wrangler login                       # opens a browser URL, tap "Allow"
-wrangler kv namespace create RATE_KV  # copy the id=... output
-# paste that id into wrangler.toml → kv_namespaces[0].id
-wrangler secret put GROQ_API_KEY      # paste gsk_...
-wrangler secret put GH_PAT            # paste github_pat_...
+wrangler login
+wrangler kv namespace create RATE_KV     # paste id into wrangler.toml
+wrangler secret put GROQ_API_KEY
+wrangler secret put GH_PAT
 wrangler deploy
-# → https://game-assets.<subdomain>.workers.dev
+curl https://<worker>/health?models=1
 ```
 
-**B. Google Cloud Shell** (browser, no phone packages): same commands, `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -` first if node is old.
+Dashboard alternative: Workers & Pages → Create → paste `backend/src/index.js` → Settings → Variables
+(add secrets **encrypted**, bind KV as `RATE_KV`).
 
-**C. Cloudflare dashboard** → Workers & Pages → Create → paste `backend/src/index.js` → Settings →
-Variables (add `GROQ_API_KEY`, `GH_PAT`, `REPO`, `CDN_BASE`, `ALLOWED_ASSETS` as **encrypted** vars) →
-Deploy. KV: Storage & Databases → KV → create `RATE_KV` → bind it to the Worker as `RATE_KV`.
-
-Smoke test:
-
-```bash
-curl -s https://game-assets.<subdomain>.workers.dev/health
-# {"ok":true,"asset":"female_base_v3",...}
-```
-
-### Worker env reference
-
-| Var | Where | Example |
+| var | kind | example |
 | --- | --- | --- |
-| `GROQ_API_KEY` | secret | `gsk_…` |
-| `GH_PAT` | secret | `github_pat_…` |
-| `REPO` | var | `yourname/game-assets` |
-| `CDN_BASE` | var | `https://cdn.jsdelivr.net/gh/yourname/game-assets` |
-| `ALLOWED_ASSETS` | var | `female_base_v3` (comma separated) |
-| `BASE_BRANCH` | var | `main` |
-| `ASSETS_BRANCH` | var | `assets` |
-| `VISION_MODEL` / `VISION_FALLBACK_MODEL` / `VALIDATOR_MODEL` | var | see step 5 |
-| `ENABLE_VALIDATOR` | var | `false` |
-| `ALLOWED_ORIGINS` | var | `*` or `https://you.github.io` |
-| `RATE_KV` | KV binding | created in step 6 |
+| `GROQ_API_KEY`, `GH_PAT` | secret | — |
+| `REPO` | var | `you/game-assets` |
+| `CDN_BASE` | var | `https://cdn.jsdelivr.net/gh/you/game-assets` |
+| `ALLOWED_ASSETS` | var | `female_base_v3` |
+| `BASE_BRANCH` / `ASSETS_BRANCH` | var | `main` / `assets` |
+| `VISION_MODELS` | var | `qwen/qwen3.8-27b` |
+| `VALIDATOR_MODEL`, `ENABLE_VALIDATOR` | var | `openai/gpt-oss-120b`, `false` |
+| `GROQ_REASONING_EFFORT` | var | `none` (thinking mode off — fewer tokens, cleaner JSON) |
+| `ALLOWED_ORIGINS` | var | `*` while testing, then your Pages origin |
+| `RATE_KV` | KV binding | created above |
+
+### CPU: 10 ms free / 30 s paid
+
+Wall-clock time waiting on Groq/GitHub does not count; CPU does. Base64 of a 512 px JPEG plus JSON
+validation stays well under 10 ms, so the free plan works for this design. If you hit `[1102]` /
+"Worker exceeded CPU": move to Workers Paid ($5, 30 s), or switch to the **thin mode** described in §11 —
+that one also removes the PAT from the Worker.
 
 ---
 
-## 7. Turn on GitHub Pages for the web UI
+## 7. Web UI (Pages)
 
-**Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: `main` / folder: `/web`** → Save.
-Wait ~1 min, open `https://<you>.github.io/game-assets/`.
+Settings → Pages → Source: **Deploy from a branch** → `main` / `/web`.
+Open `https://<you>.github.io/game-assets/`, paste the Worker URL, **Save** (it is remembered in
+`localStorage`; nothing is hardcoded in `app.js`).
 
-First run: the UI asks for the **Worker URL** (paste `https://game-assets.<subdomain>.workers.dev`) and
-stores it in `localStorage`. Nothing is hardcoded, so you can redeploy the Worker without editing `app.js`.
-
-Also enable the Actions side: **Settings → Actions → General → Workflow permissions →
-Read and write permissions** (the workflow already declares `permissions: contents: write`, but the repo
-toggle must allow it).
+Also: Settings → Actions → General → Workflow permissions → **Read and write**.
 
 ---
 
-## 8. Test the Blender pipeline before touching Groq
+## 8. Use
 
-```bash
-# locally? no. Do this from the GitHub UI:
-Actions → build-asset → Run workflow → job_id: sample → Run
-```
+1. Tap the image box, pick a reference (downscaled to 512 px on-device).
+2. Optional prompt: `taller, wider hips, red armor, long dark hair`.
+3. **Generate** → ops list appears (this is exactly what will run).
+4. Polling backs off 2 → 4 → 8 → 10 s (jsDelivr 404s new commits for up to ~2 min; hammering wastes requests).
+5. On ready: `<model-viewer>` with `camera-controls` + `auto-rotate`, download button, mirror fallbacks.
 
-`jobs/sample.json` applies three harmless ops (a `material_param`, a `proportion`, an `add_mesh`).
-Expected: green run, `Summary` shows `applied: 3, errors: 0`, and
-`assets` branch gains `out_<job_id>.glb`. Open the job log and look for the `RESULT` block.
-
-Then test end-to-end from the web UI: upload any character image, prompt
-`taller, wider hips, red armor, long dark hair`, Generate. Polling stops when
-`out_<job_id>.glb` appears (typically 2–4 min cold, ~90 s warm).
+Cold build ≈ 2–4 min (Blender download is cached after the first run), warm ≈ 60–90 s.
 
 ---
 
@@ -256,86 +247,114 @@ Then test end-to-end from the web UI: upload any character image, prompt
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Action green but `applied: 0` | Manifest names don't match the model. Check `manifest.json` and read `errors[]` in the run Summary. |
-| `add_mesh` ignored | `loc` outside `[-2,2]³` or `scale` outside `[0.01,1]` — clamped by design. Model units matter: a 1.7 m tall character expects loc ~`[0.3,0,1.4]`. |
-| `material_param` rejected | Material not in `manifest.materials`. Populate the manifest (step 3). |
-| Blender exits `-6`/`libGL` error | Missing system libs. The workflow installs `libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 xz-utils`; if you edited the step, restore it. |
-| Download 404 during "Download Blender" | Version pin removed from the mirror. Bump `BLENDER_VERSION`/`BLENDER_DIR` in `build.yml` (both must match, e.g. `4.2.9`). The step tries 3 mirrors. |
-| `fatal: could not read Username` on publish | Repo toggle in step 7 (*Read and write permissions*) is off, or your PAT was used in the workflow (it isn't — the workflow uses `GITHUB_TOKEN`). |
-| Worker `502 groq_failed` | Bad/expired key, or the model ID is gone. Re-check step 5. |
-| Worker `422 job_exists` / push races | Harmless — the Worker retries with a new `job_id` (up to 3). |
-| `ready:false` forever | Check the run: **Actions** tab. If it failed at export, the model likely has shape keys + `export_apply`. See "Known limits". |
-| jsDelivr serves a stale 404 | The UI falls back to a `raw.githubusercontent.com` URL automatically; jsDelivr's 404 cache clears in a few minutes. |
-| `<model-viewer>` blank but download works | The GLB references external textures — re-export embedded. `worker.py` always exports self-contained GLB. |
-| CORS error in console | `ALLOWED_ORIGINS` doesn't include your Pages origin. Use `*` while testing. |
-| Rate limited (`429`) | 20 requests/hour/IP, 200/day global. Wait, or bump the constants in `backend/src/index.js` consciously. |
+| `502 no_vision_model` | Nothing in `VISION_MODELS` accepts images. Run `tools/groq_preflight.py`, fix the CSV. |
+| `502 groq_failed` + `status: 404` | Model id gone. The Worker marks it `missing` for 24 h; replace the id. |
+| `502 groq_failed` + `status: 400 … image` | Model is text-only for your account. Auto-demoted; pick another. |
+| `422 no_valid_ops` | Model returned only junk ops. Shorten the prompt, or enable `ENABLE_VALIDATOR`. |
+| Action green, `applied: 0` | Manifest names don't match the mesh. Read the run Summary `errors[]`. |
+| `GLB validation failed` / `glb header truncated` | Export died mid-write — the file is **not** published. Look for `watchdog` or exporter errors above it. |
+| Worker exit `3` / `__timeout__` | Hit the 120 s watchdog. Fewer ops, or a lighter base model. |
+| `nothing to publish — identical …` | Same job re-run with byte-identical output. Correct behaviour, not an error. |
+| `could not publish after 4 attempts` | Publish is serialised (`concurrency: assets-publish`); this means 4 consecutive rejects. Re-run the job. |
+| `add_mesh` ignored | `loc` outside `[-2,2]³` or `scale` outside `[0.01,1]`. |
+| Props float when the character poses | Base has no rig — `attach_bone` needs an armature; check `manifest.bones`. |
+| `proportion` changes the wrong region | Model isn't Z-up or is offset. `populate-manifest` writes `up_axis`/`height_m`; pin `up_axis`. |
+| Morph targets distort after a build | Shape keys + vertex edits. Set `shape_key_edit: false` in the manifest. |
+| Blender `libGL` / exit `-6` | Missing `libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 xz-utils`. |
+| Blender download 404 | Mirror dropped the version. Bump `BLENDER_VERSION` **and** `BLENDER_DIR` together. |
+| `ready:false` forever | Actions tab: the run failed. If green, jsDelivr is cold — the UI retries via `statically.io`/raw. |
+| `<model-viewer>` blank, download works | CDN cache miss. Download button fetches a blob and works regardless. |
+| CORS error | `ALLOWED_ORIGINS` doesn't include the Pages origin. |
+| `429 rate_limited_*` | 20/h per IP, 200/day global — raise in `backend/src/index.js` deliberately. |
 
 ---
 
 ## 10. Security checklist
 
-- [ ] PAT is **fine-grained**, scoped to this one repo, `Contents: RW` + `Actions: RW` only, with an expiry.
-- [ ] `GH_PAT` and `GROQ_API_KEY` exist **only** as Worker secrets, never in `wrangler.toml`, never in git.
-- [ ] No secrets in the workflow — it uses the ephemeral `GITHUB_TOKEN`.
-- [ ] `ALLOWED_ASSETS` whitelist is set; the Worker rejects any other `asset_id` before calling Groq.
-- [ ] Ops are capped at 12 and every number is clamped **twice** (Worker + `worker.py`).
-- [ ] `add_mesh` `loc` is clamped to `[-2,2]³`, `scale` to `[0.01,1]`.
-- [ ] The LLM cannot emit code: only the 6 op names in `ops_spec.md` survive validation; anything else is
-      stripped (Worker) or hard-fails the op (`worker.py`).
-- [ ] Action `timeout-minutes: 15`, `worker.py` self-kills at 120 s (`signal.alarm`).
-- [ ] Rate limits: 20/hour per IP, 200/day global (KV-backed).
-- [ ] Base assets are read-only inputs; every build writes a **new** `out_<job_id>.glb`, old ones are kept.
-- [ ] `bases/*/LICENSE` exists with `commercial:` set; reference images are logged as user-provided.
-- [ ] `/status` only accepts `^[a-f0-9]{8,32}$` — no path traversal, no arbitrary file probing.
+- [ ] PAT is fine-grained, one repo, `Contents: RW` + `Actions: RW`, with an expiry.
+- [ ] `GH_PAT` / `GROQ_API_KEY` only as Worker secrets — never in `wrangler.toml`, never in git.
+- [ ] Workflows use the ephemeral `GITHUB_TOKEN`, never your PAT.
+- [ ] `ALLOWED_ASSETS` whitelist set; anything else is rejected before Groq is called.
+- [ ] ≤ 12 ops; every number clamped twice (Worker + `worker.py`).
+- [ ] `add_mesh` `loc` ∈ `[-2,2]³`, `scale` ∈ `[0.01,1]`; `attach_bone` must exist in the manifest.
+- [ ] Only the 6 op names survive validation — the model cannot smuggle code in.
+- [ ] `/status/:job_id` only accepts `^[a-f0-9]{8,32}$` (no traversal), returns `Cache-Control: no-store`.
+- [ ] Job ids are validated against `^[a-z0-9][a-z0-9_-]{0,40}$` before touching the filesystem.
+- [ ] Publish is serialised **and** retried with rebase — no lost outputs under concurrency.
+- [ ] Exported GLB is header-validated (magic/version/length) before it can reach `assets`.
+- [ ] Watchdog kills the process instead of SIGALRM; a killed run leaves only `out.glb.part`.
+- [ ] Rate limits KV-backed, per IP + global; degraded mode is reported, never silent.
+- [ ] `bases/*/LICENSE` present with `commercial:`; surfaced in every result and in the UI.
+- [ ] Non-commercial outputs are never shipped.
 - [ ] Public repo ⇒ base assets are public. Don't upload paid assets.
 
 ---
 
-## Layout
+## 11. Known limits & when to change the architecture
 
-```
-bases/female_base_v3/{model.gltf,model.bin,textures/,LICENSE,manifest.json}
-jobs/                      incoming job JSON (committed by the Worker)
-jobs/sample.json           manual test job
-assets/                    placeholder on main; real outputs live on the `assets` orphan branch
-ops_spec.md                the LLM contract (system prompt)
-worker.py                  Blender executor (ops dispatch + clamps + 120 s watchdog)
-tools/populate_manifest.py manifest dumper used by the one-shot Action
-.github/workflows/build.yml             Blender build + publish
-.github/workflows/populate-manifest.yml one-shot manifest dumper
-backend/src/index.js       Cloudflare Worker (Groq + GitHub + rate limit + CORS)
-backend/wrangler.toml      Worker config
-backend/package.json       wrangler devDependency
-web/{index.html,app.js}    vanilla JS UI, Pages-deployable, no build step
-```
+* **No sculpting / retopology.** The face, topology and surface detail stay as the base. `proportion` is a
+  smooth regional vertex scale, not a sculpt. The UI says so up front — keep it that way, or users will
+  read "different face" as a bug.
+* **Shape keys.** Vertex edits move the basis, so morph targets distort. `shape_key_edit: false` skips
+  those meshes (and `worker.py` warns either way).
+* **Hair is a stylised proxy** unless your base ships real hair meshes per style (`manifest.hair.styles`).
+* **Rig consistency is approximate**: bones are mirrored with the region, weight paint is untouched.
+* **jsDelivr caps files at 20 MB.** The build warns above that, `/status` returns `cdn_limited` plus an
+  `alt_cdn_url`, and the UI falls back automatically. For anything serious, move outputs to **Cloudflare
+  R2** (free egress via Workers) or GitHub Releases and point `CDN_BASE` at it.
+* **Actions minutes**: a private repo gets 2,000 min/month; a build is ~2–3 min cold, ~1 min warm.
+  Watch **Settings → Billing** after ~5 builds. A public repo is free.
+* **Single reference image.** Multi-angle fusion, texture baking, UV regeneration, rig auto-generation =
+  v2.
+* **Thin mode (v1.1)** — if Worker CPU becomes the constraint, move the Groq call into the workflow:
+  the Worker commits the 512 px reference to a `refs/<job_id>` branch (or R2), dispatches with just the
+  path, and a `tools/plan_ops.py` step calls Groq and fills `ops` before `worker.py` runs. Costs one
+  extra Action step; buys a Worker that does no base64/JSON work and a PAT that only needs
+  `contents:write` + `actions:write` on a scratch branch.
 
 ---
 
-## Known limits (non-goals for v1)
+## 12. Post-deploy test checklist (~20 min)
 
-* **No sculpting / retopology.** Headless Blender can't do organic remodelling; `proportion` is a smooth
-  regional vertex scale, not a sculpt. Silhouette changes are soft and local.
-* **Stylised hair proxy only.** `hair_swap` prefers pre-modelled hair meshes declared in
-  `manifest.hair.styles`; otherwise it builds a simple primitive-based hair cap/mass. Not hair cards.
-* **Rig consistency is approximate.** When vertices are scaled, matching bones are scaled too, but weight
-  paint is untouched — expect small deformation drift on extreme poses.
-* **Single reference image.** Multi-angle fusion, texture baking, UV regeneration and rig auto-generation
-  are v2.
-* **Output is a `.glb` only.** Unity/Godot/Unreal import it as-is; there are no engine plugins.
-* Shape keys + `export_apply=True` can make Blender warn; if you need morphs, drop `export_apply` in
-  `worker.py` (one line) and apply modifiers explicitly instead.
+| test | expected |
+| --- | --- |
+| `jobs` with `ops: []` | clean copy of the base exported, `ok:true`, warning "no ops", run green |
+| 12 ops | all applied |
+| 13 ops | Worker truncates with a warning; worker caps at 12 anyway |
+| `material_param` on a bogus material | dropped with a warning, build continues |
+| `add_mesh` with `loc:[9,9,9]` | clamped to `[2,2,2]`, no error |
+| 8 MB reference PNG | client resizes to 512 px, Worker never returns 413 |
+| base without an armature | `bone_resize` warns + skips, GLB exports without skins |
+| same `job_id` twice | second publish reports "nothing to publish", run green |
+| two jobs at once | both `out_*.glb` present on `assets` |
+| 21st request in an hour | `429 rate_limited_ip` |
+| 25 MB GLB | published, `cdn_limited:true`, UI uses the mirror CDN |
+
+---
+
+## 13. Local checks (no Blender, no cloud)
+
+```bash
+python3 -c "import ast;ast.parse(open('worker.py').read())"
+node --check web/app.js
+cd backend && npm run check                      # node --check src/index.js
+python3 -m json.tool bases/female_base_v3/manifest.json >/dev/null
+```
+
+The three suites used while building this (stub `bpy`, mocked Worker fetch, jsdom UI) are not committed:
+they need a fake Blender and add noise to a repo you deploy from. Re-create them if you change op
+semantics.
 
 ---
 
 ## Assumptions
 
-1. `asset_id` is `female_base_v3` and it ships an armature. If not, set `"skinning": false` in the manifest
-   (see step 3) — rig ops then no-op with warnings instead of failing.
-2. Units are metres, ~1.6–1.9 m tall characters; `add_mesh` clamps assume that scale.
-3. The base is public-domain/commercially usable and **public** (CDN + Pages need public).
-4. Repo is `main` (base) + `assets` (outputs); the workflow creates `assets` on first publish if missing.
-5. Models face **-Y in Blender** (standard glTF import, +Z forward in glTF). Hair is placed behind the head
-   on that basis; override with `manifest.hair.forward_axis` if your model faces +Y.
-6. Groq free tier is used: 30 RPM / 1k RPD — the Worker's 20/h + 200/day limits are deliberately below it.
-7. `qwen/qwen3.8-27b` accepts image input on your account; the Worker falls back to
-   `qwen/qwen3.6-27b` and then to a JSON-repair pass. Verify in step 5.
+1. `asset_id` is `female_base_v3` with an armature; otherwise set `"skinning": false`.
+2. Metres, 1.6–1.9 m characters, Z-up after import (auto-detected, override with `up_axis`).
+3. Base is public and commercially usable; the repo is public.
+4. Branches: `main` (source) + `assets` (outputs, created on first publish).
+5. Models face **-Y in Blender** (standard glTF import). Hair is placed behind the head on that basis —
+   override `manifest.hair.forward_axis` if yours faces +Y.
+6. Groq free tier (30 RPM / 1k RPD); the Worker's 20/h + 200/day sit below it on purpose.
+7. `qwen/qwen3.8-27b` remains available and multimodal on your account — verified by
+   `tools/groq_preflight.py` and `/models?probe=1`, not by hope.

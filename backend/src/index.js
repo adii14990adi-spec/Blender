@@ -21,11 +21,13 @@ const MAX_OPS = 12;
 const MAX_IMAGES = 3;
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // 8 MB of base64
 const MAX_IMAGE_CHARS = 2_600_000; // ~1.9 MB decoded per image
-const SPEC_TTL = 60 * 60; // 1h
-const MANIFEST_TTL = 10 * 60;
 const PER_IP_LIMIT = 20; // per rolling hour
 const GLOBAL_LIMIT = 200; // per day
 const GROQ_TIMEOUT_MS = 45_000;
+const MODELS_TTL = 60 * 60; // Groq /models cache
+// 1x1 PNG, used by /models?probe=1 to prove a model really accepts image_url
+const PROBE_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 const FACTOR_MIN = 0.7;
 const FACTOR_MAX = 1.3;
@@ -186,10 +188,16 @@ async function gh(env, path, init = {}) {
 }
 
 async function fetchRepoFile(env, path) {
-  // raw.githubusercontent first (cheap, no auth, no API quota), then the contents API
+  // raw.githubusercontent first (cheap, no auth, no API quota), then the contents API.
+  // Edge cache is 60s, NOT an hour: editing ops_spec.md or the manifest must show up on the
+  // next job, not after lunch. KV only ever holds the last known-good copy as a fallback.
   const raw = `https://raw.githubusercontent.com/${env.REPO}/${env.BASE_BRANCH || "main"}/${path}`;
   try {
-    const res = await withTimeout((signal) => fetch(raw, { signal, cf: { cacheTtl: 300 } }), 15000, "raw");
+    const res = await withTimeout(
+      (signal) => fetch(raw, { signal, cf: { cacheTtl: 60, cacheEverything: true } }),
+      15000,
+      "raw",
+    );
     if (res.ok) return await res.text();
   } catch {
     /* fall through */
@@ -200,40 +208,58 @@ async function fetchRepoFile(env, path) {
   return body.encoding === "base64" ? b64decode(body.content || "") : String(body.content || "");
 }
 
-async function cachedText(env, key, ttl, loader) {
-  if (env.RATE_KV) {
-    try {
-      const hit = await env.RATE_KV.get(key);
-      if (hit) return hit;
-    } catch {
-      /* ignore cache errors */
-    }
+async function kvGet(env, key) {
+  if (!env.RATE_KV) return null;
+  try {
+    return await env.RATE_KV.get(key);
+  } catch {
+    return null;
   }
-  const value = await loader();
-  if (env.RATE_KV && value) {
-    try {
-      await env.RATE_KV.put(key, value, { expirationTtl: ttl });
-    } catch {
-      /* ignore */
-    }
-  }
-  return value;
 }
 
-const loadSpec = (env) => cachedText(env, "spec:v2", SPEC_TTL, () => fetchRepoFile(env, "ops_spec.md"));
+async function kvPut(env, key, value, ttl) {
+  if (!env.RATE_KV) return;
+  try {
+    await env.RATE_KV.put(key, value, { expirationTtl: ttl });
+  } catch {
+    /* cache is best effort */
+  }
+}
+
+async function loadSpec(env) {
+  const cacheKey = "spec:v3";
+  try {
+    const text = await fetchRepoFile(env, "ops_spec.md");
+    if (text && text.length > 80) {
+      await kvPut(env, cacheKey, text, 86400);
+      return text;
+    }
+  } catch {
+    /* fall back to the cached copy */
+  }
+  const cached = await kvGet(env, cacheKey);
+  if (cached) return cached;
+  throw new HttpError(500, "repo_file_unavailable", { path: "ops_spec.md" });
+}
 
 async function loadManifest(env, assetId) {
-  const text = await cachedText(env, `manifest:${assetId}:v2`, MANIFEST_TTL, async () => {
-    try {
-      return await fetchRepoFile(env, `bases/${assetId}/manifest.json`);
-    } catch {
-      return "{}";
-    }
-  });
+  const cacheKey = `manifest:${assetId}:v3`;
   try {
-    return JSON.parse(text);
+    const text = await fetchRepoFile(env, `bases/${assetId}/manifest.json`);
+    const data = JSON.parse(text);
+    // remember the version alongside the copy so a stale fallback is obvious in logs
+    await kvPut(env, cacheKey, JSON.stringify({ version: data.version ?? null, text }), 86400);
+    return data;
   } catch {
-    return {};
+    const hit = await kvGet(env, cacheKey);
+    if (!hit) return {};
+    try {
+      const parsed = JSON.parse(hit);
+      console.log("manifest fallback used, version", parsed.version);
+      return JSON.parse(parsed.text);
+    } catch {
+      return {};
+    }
   }
 }
 
@@ -276,25 +302,72 @@ async function rateLimit(env, ip) {
 // Groq
 // --------------------------------------------------------------------------- //
 
+function visionModels(env) {
+  const raw = env.VISION_MODELS || env.VISION_MODEL || "qwen/qwen3.8-27b";
+  return raw.split(",").map((m) => m.trim()).filter(Boolean);
+}
+
+async function groqModelIds(env, force) {
+  const cacheKey = "groq:models:v1";
+  if (!force) {
+    const hit = await kvGet(env, cacheKey);
+    if (hit) return JSON.parse(hit);
+  }
+  try {
+    const res = await withTimeout(
+      (signal) =>
+        fetch("https://api.groq.com/openai/v1/models", {
+          signal,
+          headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+        }),
+      15000,
+      "groq_models",
+    );
+    if (!res.ok) return null;
+    const body = await res.json();
+    const ids = (body.data || []).map((m) => m.id).filter(Boolean);
+    await kvPut(env, cacheKey, JSON.stringify(ids), MODELS_TTL);
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
+const capability = async (env, id) => (await kvGet(env, `groq:cap:${id}`)) || "unknown";
+const setCapability = (env, id, value) => kvPut(env, `groq:cap:${id}`, value, 86400);
+
 async function groqChat(env, { model, messages, jsonMode = true, temperature = 0.2, maxTokens = 1400 }) {
   if (!env.GROQ_API_KEY) throw new HttpError(500, "groq_key_missing");
   const body = { model, messages, temperature, max_completion_tokens: maxTokens };
   if (jsonMode) body.response_format = { type: "json_object" };
+  // Qwen 3.8 runs in thinking mode by default; ops planning does not need the tokens.
+  if (env.GROQ_REASONING_EFFORT) body.reasoning_effort = env.GROQ_REASONING_EFFORT;
 
-  const res = await withTimeout(
-    (signal) =>
-      fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        signal,
-        headers: {
-          Authorization: `Bearer ${env.GROQ_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }),
-    GROQ_TIMEOUT_MS,
-    "groq",
-  );
+  const send = (payload) =>
+    withTimeout(
+      (signal) =>
+        fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          signal,
+          headers: {
+            Authorization: `Bearer ${env.GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        }),
+      GROQ_TIMEOUT_MS,
+      "groq",
+    );
+
+  let res = await send(body);
+  if (res.status === 400 && body.reasoning_effort) {
+    const peek = await res.clone().text();
+    if (/reasoning_effort|unsupported parameter/i.test(peek)) {
+      // this model does not take the parameter — retry once without it
+      delete body.reasoning_effort;
+      res = await send(body);
+    }
+  }
 
   const text = await res.text();
   if (!res.ok) {
@@ -303,6 +376,7 @@ async function groqChat(env, { model, messages, jsonMode = true, temperature = 0
       status: res.status,
       detail: text.slice(0, 600),
     });
+    err.upstream = { status: res.status, body: text };
     throw err;
   }
   let parsed;
@@ -470,6 +544,17 @@ function cleanOp(raw, manifest, warnings) {
       const rot = [0, 1, 2].map((i) => clampNum(raw.rot[i], -180, 180));
       if (!rot.includes(null)) op.rot = rot.map(round4);
     }
+    const attach = String(raw.attach_bone || "auto").trim();
+    if (attach && attach.toLowerCase() !== "auto") {
+      if (/^(none|off|no|false)$/i.test(attach)) {
+        op.attach_bone = "none";
+      } else if (bones.length && !bones.some((b) => b.toLowerCase() === attach.toLowerCase())) {
+        warnings.push(`add_mesh ${meshName}: bone "${attach}" not in manifest — using the nearest bone`);
+        op.attach_bone = "auto";
+      } else {
+        op.attach_bone = attach;
+      }
+    }
     if (raw.mat) {
       const mat = String(raw.mat);
       if (mats.length && !caseIn(mats, mat)) warnings.push(`add_mesh ${meshName}: material "${mat}" ignored (not in manifest)`);
@@ -527,15 +612,50 @@ function sanitize(unsigned, manifest, assetId, warnings) {
 
 async function generateOps(env, spec, manifest, prompt, images, warnings) {
   const messages = buildMessages(spec, manifest, prompt, images);
-  const primary = env.VISION_MODEL || "qwen/qwen3.8-27b";
-  const fallback = env.VISION_FALLBACK_MODEL || "qwen/qwen3.6-27b";
+  const declared = visionModels(env);
+  const available = await groqModelIds(env, false);
 
-  const attempts = [
-    { model: primary, jsonMode: true },
-    { model: primary, jsonMode: false },
-    { model: fallback, jsonMode: true },
-    { model: fallback, jsonMode: false },
-  ];
+  // never let a model that is not on this account, or one that rejected image_url, be primary
+  const chain = [];
+  let knownBad = 0;
+  for (const id of declared) {
+    if (available && !available.includes(id)) {
+      warnings.push(`vision model ${id} is not available on this account — skipped`);
+      knownBad += 1;
+      continue;
+    }
+    const cap = await capability(env, id);
+    if (cap === "text") {
+      warnings.push(`vision model ${id} rejected images earlier — skipped (text-only)`);
+      knownBad += 1;
+      continue;
+    }
+    if (cap === "missing") {
+      warnings.push(`vision model ${id} returned 404 earlier — skipped`);
+      knownBad += 1;
+      continue;
+    }
+    chain.push(id);
+  }
+  if (!chain.length && knownBad >= declared.length && available !== null) {
+    // every configured model is known-dead: fail loudly instead of re-probing a text-only model
+    throw new HttpError(502, "no_vision_model", {
+      configured: declared,
+      detail: "none of VISION_MODELS accepts images on this account — check /models?probe=1",
+      warnings: [...new Set(warnings)],
+    });
+  }
+  if (!chain.length) {
+    // availability unknown (Groq /models unreachable): try the first id so the error is actionable
+    chain.push(declared[0] || "qwen/qwen3.8-27b");
+    warnings.push("no verified vision model — falling back to the first configured id");
+  }
+
+  const attempts = [];
+  for (const model of chain) {
+    attempts.push({ model, jsonMode: true });
+    attempts.push({ model, jsonMode: false });
+  }
 
   let lastError = null;
   for (const attempt of attempts) {
@@ -548,7 +668,16 @@ async function generateOps(env, spec, manifest, prompt, images, warnings) {
     } catch (err) {
       lastError = err;
       warnings.push(`${attempt.model}: ${err.code || err.message}`);
-      if (err.status === 500) throw err; // missing key etc. — do not retry
+      if (err.status === 500) throw err; // missing key etc. — retrying cannot help
+      const upstream = err.upstream || {};
+      const detail = String(upstream.body || err.extra?.detail || "");
+      if (upstream.status === 404) {
+        await setCapability(env, attempt.model, "missing");
+      } else if (upstream.status === 400 && /image|multi-?modal|content.?type|vision/i.test(detail)) {
+        // documented as multimodal, but this account/model cannot take image_url -> never primary again
+        await setCapability(env, attempt.model, "text");
+        warnings.push(`${attempt.model} does not accept image input — marked text-only for 24h`);
+      }
     }
   }
   throw lastError || new HttpError(502, "groq_failed");
@@ -646,17 +775,25 @@ async function assetsBranchInfo(env) {
   return info;
 }
 
-async function assetExists(env, sha, fileName) {
-  if (!sha) return false;
+async function assetInfo(env, sha, fileName) {
+  if (!sha) return { exists: false, size: 0 };
   const res = await gh(env, `/git/trees/${sha}`);
-  if (!res.ok) return false;
+  if (!res.ok) return { exists: false, size: 0 };
   const body = await res.json();
-  return (body.tree || []).some((entry) => entry.path === fileName);
+  const entry = (body.tree || []).find((e) => e.path === fileName);
+  return entry ? { exists: true, size: entry.size || 0 } : { exists: false, size: 0 };
 }
+
+const JSDELIVR_MAX_BYTES = 20 * 1024 * 1024;
 
 function cdnUrl(env, ref, fileName) {
   const base = (env.CDN_BASE || "").replace(/\/+$/, "");
   return base ? `${base}@${ref}/${fileName}` : null;
+}
+
+// alternate CDN: pinning the commit avoids jsDelivr's branch cache entirely
+function staticallyUrl(env, ref, fileName) {
+  return env.REPO && ref ? `https://cdn.statically.io/gh/${env.REPO}/${ref}/${fileName}` : null;
 }
 
 function rawUrl(env, fileName) {
@@ -795,27 +932,93 @@ async function handleStatus(env, jobId) {
       /* ignore */
     }
   }
+
   const { sha, branch } = await assetsBranchInfo(env);
-  const ready = await assetExists(env, sha, fileName);
+  const info = await assetInfo(env, sha, fileName);
+  const ready = info.exists;
+  const oversized = ready && info.size > JSDELIVR_MAX_BYTES;
+
   const responds = {
     ready,
     job_id: jobId,
     file: fileName,
-    url: ready ? cdnUrl(env, sha, fileName) : null,
+    bytes: info.size,
+    url: ready && !oversized ? cdnUrl(env, sha, fileName) : null,
     fallback_url: ready ? cdnUrl(env, branch, fileName) : null,
     raw_url: ready ? rawUrl(env, fileName) : null,
+    alt_cdn_url: ready ? staticallyUrl(env, sha, fileName) : null,
     commit: sha,
+    retry_after_ms: ready ? 0 : 5000,
   };
+
   if (!ready) {
-    responds.hint = "build usually takes 1-4 minutes; keep polling";
-  } else if (env.RATE_KV) {
-    try {
-      await env.RATE_KV.put(`done:${jobId}`, JSON.stringify(responds), { expirationTtl: 86400 });
-    } catch {
-      /* ignore */
+    responds.hint = "build usually takes 1-4 minutes; poll with backoff";
+  } else {
+    if (oversized) {
+      responds.hint =
+        `this GLB is ${(info.size / 1048576).toFixed(1)} MB — above jsDelivr's 20 MB limit, ` +
+        "use alt_cdn_url or move outputs to R2";
+      responds.cdn_limited = true;
     }
+    await kvPut(env, `done:${jobId}`, JSON.stringify(responds), 86400);
   }
   return json(responds, 200);
+}
+
+async function handleModels(env, url) {
+  const probe = url.searchParams.get("probe") === "1";
+  const configured = visionModels(env);
+  const listed = await groqModelIds(env, probe);
+  const results = [];
+
+  for (const id of configured) {
+    const cap = await capability(env, id);
+    const entry = { id, listed: listed ? listed.includes(id) : null, cached_capability: cap };
+    if (probe && (!listed || listed.includes(id))) {
+      const started = Date.now();
+      try {
+        const { content } = await groqChat(env, {
+          model: id,
+          messages: [
+            { role: "user", content: [
+              { type: "text", text: "Reply with the single word ok." },
+              { type: "image_url", image_url: { url: PROBE_PNG } },
+            ] },
+          ],
+          jsonMode: false,
+          temperature: 0,
+          maxTokens: 8,
+        });
+        entry.image_probe = "ok";
+        entry.sample = String(content).slice(0, 40);
+        await setCapability(env, id, "vision");
+      } catch (err) {
+        entry.image_probe = "failed";
+        entry.error = err.code || err.message;
+        entry.upstream_status = err.upstream?.status ?? null;
+        const body = String(err.upstream?.body || "");
+        if (err.upstream?.status === 404) await setCapability(env, id, "missing");
+        else if (err.upstream?.status === 400 && /image|multi-?modal|content.?type|vision/i.test(body))
+          await setCapability(env, id, "text");
+        else if (/invalid_json|groq_empty/.test(entry.error)) {
+          // a 200 with unusable text still proves the image was accepted
+          entry.image_probe = "ok";
+          await setCapability(env, id, "vision");
+        }
+      }
+      entry.latency_ms = Date.now() - started;
+    }
+    results.push(entry);
+  }
+
+  return json({
+    configured,
+    probe_ran: probe,
+    available_count: listed ? listed.length : null,
+    available: listed ? listed.filter((id) => /qwen|llama-4|vision|gpt-oss|muse/.test(id)) : null,
+    models: results,
+    note: "run /models?probe=1 after deploying to prove image_url works for each configured model",
+  });
 }
 
 async function handleAssets(env) {
@@ -823,17 +1026,28 @@ async function handleAssets(env) {
   return json({ assets: allowed, cdn_base: env.CDN_BASE || null });
 }
 
-async function handleHealth(env) {
+async function handleHealth(env, url) {
+  const configured = visionModels(env);
+  const listed = url && url.searchParams.get("models") === "1" ? await groqModelIds(env, true) : await groqModelIds(env, false);
+  const caps = {};
+  for (const id of configured) caps[id] = await capability(env, id);
+
   return json({
     ok: true,
     assets: (env.ALLOWED_ASSETS || "").split(",").map((s) => s.trim()).filter(Boolean),
     models: {
-      vision: env.VISION_MODEL || "qwen/qwen3.8-27b",
-      fallback: env.VISION_FALLBACK_MODEL || "qwen/qwen3.6-27b",
+      vision_chain: configured,
+      available_on_account: listed ? configured.filter((id) => listed.includes(id)) : null,
+      missing_from_account: listed ? configured.filter((id) => !listed.includes(id)) : null,
+      capabilities: caps,
       validator: env.VALIDATOR_MODEL || "openai/gpt-oss-120b",
       validator_enabled: String(env.ENABLE_VALIDATOR).toLowerCase() === "true",
+      reasoning_effort: env.GROQ_REASONING_EFFORT || null,
+      checked_live: Boolean(url && url.searchParams.get("models") === "1"),
+      probe_url: "/models?probe=1",
     },
     repo: env.REPO || null,
+    assets_branch: env.ASSETS_BRANCH || "assets",
     kv: Boolean(env.RATE_KV),
     time: new Date().toISOString(),
   });
@@ -859,8 +1073,9 @@ export default {
     };
 
     try {
-      if (url.pathname === "/health" || url.pathname === "/") return respond(await handleHealth(env));
+      if (url.pathname === "/health" || url.pathname === "/") return respond(await handleHealth(env, url));
       if (url.pathname === "/assets") return respond(await handleAssets(env));
+      if (url.pathname === "/models") return respond(await handleModels(env, url));
 
       if (url.pathname === "/generate") {
         if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");

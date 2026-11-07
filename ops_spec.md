@@ -42,10 +42,18 @@ the reference. You never write code. You never explain.
 | | `scale` | [sx,sy,sz] | each in **[0.01, 1.0]** metres |
 | | `rot` | [x,y,z] | optional, degrees, each in [-180, 180] |
 | | `mat` | string | optional material name from the manifest |
+| | `attach_bone` | string | optional. Bone name from the manifest, or `"auto"` (default: nearest bone to `loc`), or `"none"`. Props are rigidly parented to that bone so they follow the pose |
 | `hair_swap` | `style` | enum | `long_straight`, `long_wavy`, `bob`, `ponytail`, `twin_tails`, `short`, `buzz`, `bald`, `as_is` |
 | | `color` | hex | `"#rrggbb"` |
 
 Omitted numeric fields fall back to `1.0`. Unknown extra fields are ignored.
+
+## What the base model can and cannot do
+
+The executor scales regions, recolours materials, adds primitives and swaps hair. It does **not**
+sculpt, retopologise, or regenerate textures — so facial structure, topology and surface detail stay
+exactly as they are in the base. If the reference has a different face, map that difference onto what
+you *can* express (hair, materials, proportions, gear) and say so in `notes`.
 
 ## Coordinate system
 
@@ -64,8 +72,10 @@ Armour/accessory meshes belong slightly outside the body surface (e.g. left shou
   prefer it over `set_scale` on the body.
 * `bone_resize` — resizes the bone and its skinned vertices together (limb thickness/length).
 * `material_param` — one parameter on one material. Colour params take hex; roughness/metallic take numbers.
-* `add_mesh` — one primitive, optionally materialised. Use it for hard-surface add-ons (shoulder pads,
-  belts, horns, visors). Do not try to build organic shapes with primitives.
+* `add_mesh` — one primitive, optionally materialised, rigidly attached to a bone (default: the nearest
+  bone to `loc`, which is what you want for shoulder pads, helmets, belts, horns). Use it for
+  hard-surface add-ons only; do not try to build organic shapes with primitives. Set
+  `attach_bone:"none"` only for something that must stay in world space.
 * `hair_swap` — replaces the character's hair with the requested style and colour.
 
 ## Output shape — exact
@@ -94,4 +104,5 @@ Armour/accessory meshes belong slightly outside the body surface (e.g. left shou
 ## BASE MODEL
 
 The manifest is appended below by the caller as `MANIFEST`. Use its `meshes`, `materials`, `bones`
-and `hair.styles` exactly as written.
+and `hair.styles` exactly as written. If `MANIFEST.bones` is empty the base has no rig: skip
+`bone_resize` and leave `attach_bone` off, and prefer `proportion`/`set_scale` for shape changes.

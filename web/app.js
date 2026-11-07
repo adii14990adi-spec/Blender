@@ -5,8 +5,10 @@
   var MAX_EDGE = 512; // reference images are downscaled to 512px before upload
   var JPEG_QUALITY = 0.85;
   var MAX_IMAGE_BYTES = 1.6 * 1024 * 1024; // keep well under the Worker's 1.9 MB cap
-  var POLL_MS = 5000;
-  var POLL_MAX_MS = 5 * 60 * 1000; // 5 minutes
+  // jsDelivr 404s a brand-new commit for 30-120 s, so hammering every 5 s is wasted work:
+  // poll with backoff instead (2 → 4 → 8 → 10 s, capped), unelss the Worker says otherwise.
+  var POLL_SCHEDULE = [2000, 4000, 8000, 10000];
+  var POLL_MAX_MS = 6 * 60 * 1000; // 6 minutes
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -325,7 +327,7 @@
       setPill("err", "timeout");
       setNote(
         $("statusNote"),
-        "No output after 5 minutes. Open the build logs — the run may have failed at import or export.",
+        "No output after 6 minutes. Open the build logs — the run may have failed at import or export.",
         "err"
       );
       $("retryRow").classList.remove("hidden");
@@ -347,22 +349,44 @@
           $("go").disabled = false;
           return;
         }
+        var delay = nextDelay(s);
         setNote(
           $("statusNote"),
-          "Waiting for the build… poll " + state.attempt + " · " + $("elapsed").textContent,
+          "Building… check " + state.attempt + " · " + $("elapsed").textContent +
+            " elapsed · next in " + Math.round(delay / 1000) + "s",
           ""
         );
-        state.pollTimer = setTimeout(poll, POLL_MS);
+        state.pollTimer = setTimeout(poll, delay);
       })
       .catch(function () {
-        state.pollTimer = setTimeout(poll, POLL_MS); // transient network blip
+        state.pollTimer = setTimeout(poll, nextDelay(null)); // transient network blip
       });
   }
 
   // ----------------------------------------------------------------- viewer
 
+  function nextDelay(resp) {
+    if (resp && typeof resp.retry_after_ms === "number" && resp.retry_after_ms > 0) {
+      return Math.min(resp.retry_after_ms, 15000);
+    }
+    var i = Math.max(0, Math.min(state.attempt - 1, POLL_SCHEDULE.length - 1));
+    return POLL_SCHEDULE[i];
+  }
+
+  function unique(list) {
+    return list.filter(function (v, i) { return v && list.indexOf(v) === i; });
+  }
+
   function showModel(status) {
-    state.urls = [status.url, status.fallback_url, status.raw_url].filter(Boolean);
+    // commit-pinned CDN → commit-pinned mirror → branch CDN → raw github
+    state.urls = unique([status.url, status.alt_cdn_url, status.fallback_url, status.raw_url]);
+    if (status.cdn_limited) {
+      setNote(
+        $("viewerNote"),
+        "This GLB is " + humanBytes(status.bytes) + " — over jsDelivr's 20 MB limit, using the mirror CDN.",
+        "warn"
+      );
+    }
     state.viewerTried = 0;
     var viewer = $("viewer");
     $("viewerCard").classList.add("on");

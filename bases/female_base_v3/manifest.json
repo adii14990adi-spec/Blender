@@ -4,8 +4,12 @@
   "model": "model.gltf",
   "license_file": "LICENSE",
   "unit_scale": 1.0,
+  "up_axis": "auto",
   "forward_axis": "-Y",
+  "height_m": null,
+  "origin_height": null,
   "skinning": true,
+  "shape_key_edit": true,
   "armature": "",
   "meshes": [],
   "bones": [],
@@ -17,5 +21,5 @@
     "meshes": [],
     "styles": {}
   },
-  "notes": "Skeleton file. Run Actions -> populate-manifest to fill meshes/bones/materials automatically, or type the exact names in by hand. worker.py tolerates empty arrays (it fuzzy-matches names) but the LLM cannot reference names it cannot see."
+  "notes": "Skeleton file. Run Actions -> populate-manifest to fill meshes/bones/materials/up_axis/height_m automatically, or type the exact names in by hand. worker.py tolerates empty arrays (it fuzzy-matches names) but the LLM cannot reference names it cannot see. up_axis: auto detects from bounding box; pin to X/Y/Z if detection picks wrong. shape_key_edit:false makes vertex ops skip meshes that have blend shapes instead of distorting the morph targets."
 }
