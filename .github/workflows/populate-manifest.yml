@@ -1,0 +1,95 @@
+name: populate-manifest
+
+# One-shot helper: imports the base model in Blender and writes the real
+# mesh/bone/material names into bases/<asset_id>/manifest.json, then commits
+# the result to main. Run it once after uploading a new base asset.
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: "Asset folder under bases/"
+        required: true
+        default: "female_base_v3"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: populate-manifest-${{ github.event.inputs.asset_id }}
+  cancel-in-progress: false
+
+env:
+  BLENDER_VERSION: "4.2.3"
+  BLENDER_DIR: "blender-4.2.3-linux-x64"
+
+jobs:
+  populate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: .blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64-v1
+
+      - name: Install Blender system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 xz-utils
+
+      - name: Download Blender
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .blender && cd .blender
+          for u in \
+            "https://download.blender.org/release/Blender4.2/${BLENDER_DIR}.tar.xz" \
+            "https://mirror.clarkson.edu/blender/release/Blender4.2/${BLENDER_DIR}.tar.xz" ; do
+            if curl -fL --retry 3 -o b.tar.xz "$u"; then tar -xf b.tar.xz && rm -f b.tar.xz && break; fi
+            rm -f b.tar.xz
+          done
+          test -x "${BLENDER_DIR}/blender"
+
+      - name: Dump names
+        env:
+          ASSET: ${{ github.event.inputs.asset_id }}
+        run: |
+          set -euo pipefail
+          .blender/${BLENDER_DIR}/blender --background --factory-startup \
+            --python tools/populate_manifest.py -- "$ASSET"
+
+      - name: Commit manifest
+        env:
+          ASSET: ${{ github.event.inputs.asset_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- "bases/$ASSET/manifest.json"; then
+            echo "manifest unchanged"
+            exit 0
+          fi
+          git add "bases/$ASSET/manifest.json"
+          git commit -m "manifest: populate $ASSET from model"
+          git push
+
+      - name: Summary
+        if: always()
+        env:
+          ASSET: ${{ github.event.inputs.asset_id }}
+        run: |
+          {
+            echo "## manifest — \`$ASSET\`"
+            echo
+            echo '```json'
+            head -c 4000 "bases/$ASSET/manifest.json" || echo "(no manifest written)"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

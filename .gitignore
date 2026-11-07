@@ -1,0 +1,30 @@
+# build outputs / scratch
+*.blend
+*.blend1
+*.glb
+!bases/**/*.glb
+!bases/*/*.glb
+*.log
+/tmp/
+.out/
+
+# blender download cache used by the workflow locally
+.blender/
+blender-*-linux-x64/
+
+# worker
+backend/node_modules/
+backend/.wrangler/
+backend/.dev.vars
+backend/package-lock.json
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# secrets — never commit
+.env
+*.pem
+secrets.*

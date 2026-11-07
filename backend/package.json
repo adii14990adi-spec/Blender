@@ -1,0 +1,21 @@
+{
+  "name": "game-assets-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker: Groq vision -> ops DSL -> GitHub Actions Blender build",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "whoami": "wrangler whoami",
+    "kv:create": "wrangler kv namespace create RATE_KV",
+    "check": "node --check src/index.js"
+  },
+  "keywords": ["cloudflare-worker", "groq", "blender", "gltf"],
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

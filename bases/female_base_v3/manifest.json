@@ -1,0 +1,21 @@
+{
+  "asset_id": "female_base_v3",
+  "version": 1,
+  "model": "model.gltf",
+  "license_file": "LICENSE",
+  "unit_scale": 1.0,
+  "forward_axis": "-Y",
+  "skinning": true,
+  "armature": "",
+  "meshes": [],
+  "bones": [],
+  "materials": [],
+  "shape_keys": [],
+  "hair": {
+    "head_bone": "head",
+    "forward_axis": "-Y",
+    "meshes": [],
+    "styles": {}
+  },
+  "notes": "Skeleton file. Run Actions -> populate-manifest to fill meshes/bones/materials automatically, or type the exact names in by hand. worker.py tolerates empty arrays (it fuzzy-matches names) but the LLM cannot reference names it cannot see."
+}

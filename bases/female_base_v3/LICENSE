@@ -1,0 +1,12 @@
+commercial: false
+source: https://TODO-replace-with-the-real-source
+author: TODO
+license: TODO
+attribution: "TODO — replace this file, it is a template"
+notes: |
+  Template license block. Replace every field before publishing outputs.
+  commercial: true  -> outputs may be shipped in a commercial build
+  commercial: false -> outputs are for evaluation only; do not ship
+  worker.py reads the first line and surfaces the value in every build result
+  and in the web UI. Reference images uploaded by users are user-provided;
+  the user is responsible for the rights to those images.

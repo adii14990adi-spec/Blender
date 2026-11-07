@@ -1,0 +1,44 @@
+# Cloudflare Worker config — game-assets
+#
+#   npm install
+#   npx wrangler kv namespace create RATE_KV     # copy the id into [[kv_namespaces]] below
+#   npx wrangler secret put GROQ_API_KEY         # gsk_...
+#   npx wrangler secret put GH_PAT               # github_pat_... (contents:write + actions:write)
+#   npx wrangler deploy
+#
+# Everything in [vars] is public config, not a secret. Replace every REPLACE_ME / yourname.
+
+name = "game-assets"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Non-secret configuration. Model IDs live here only — never hardcode them in src/index.js.
+[vars]
+REPO = "yourname/game-assets"                                # owner/repo of THIS repo
+BASE_BRANCH = "main"                                         # where bases/, ops_spec.md and jobs/ live
+ASSETS_BRANCH = "assets"                                     # orphan branch with the built GLBs
+CDN_BASE = "https://cdn.jsdelivr.net/gh/yourname/game-assets" # jsDelivr (CORS enabled)
+ALLOWED_ASSETS = "female_base_v3"                            # comma separated whitelist
+ALLOWED_ORIGINS = "*"                                        # or "https://yourname.github.io"
+
+# Confirm these against https://console.groq.com/docs/models before you deploy.
+VISION_MODEL = "qwen/qwen3.8-27b"                            # primary: image + text -> ops JSON
+VISION_FALLBACK_MODEL = "qwen/qwen3.6-27b"                   # multimodal fallback (Scout is retiring)
+VALIDATOR_MODEL = "openai/gpt-oss-120b"                      # text-only second pass
+ENABLE_VALIDATOR = "false"                                   # "true" to spend a second Groq call
+
+# KV: rate limiting (20/h per IP, 200/day global) + ops_spec/manifest cache.
+# Create it with:  npx wrangler kv namespace create RATE_KV
+[[kv_namespaces]]
+binding = "RATE_KV"
+id = "REPLACE_ME_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_ME_WITH_KV_PREVIEW_ID"
+
+# Secrets — declared here only as documentation, set them with `wrangler secret put`:
+#   GROQ_API_KEY = "gsk_..."            (console.groq.com)
+#   GH_PAT       = "github_pat_..."     (fine-grained: Contents RW + Actions RW, this repo only)
+#
+# Dashboard equivalent: Workers & Pages -> game-assets -> Settings -> Variables and Secrets.
+
+[observability]
+enabled = true

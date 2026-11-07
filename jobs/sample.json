@@ -1,0 +1,22 @@
+{
+  "job_id": "sample",
+  "asset_id": "female_base_v3",
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "source": "manual-test",
+  "prompt": "slightly taller, wider hips, one shoulder pad",
+  "reference": {
+    "type": "none",
+    "note": "manual smoke test: no image, ops are hand-written"
+  },
+  "ops": [
+    { "op": "proportion", "part": "hips", "width": 1.12, "height": 1.0 },
+    { "op": "set_scale", "target": "Body", "axis": "z", "factor": 1.03 },
+    {
+      "op": "add_mesh",
+      "primitive": "cube",
+      "name": "ShoulderPad_L",
+      "loc": [0.28, 0.0, 1.42],
+      "scale": [0.14, 0.12, 0.07]
+    }
+  ]
+}

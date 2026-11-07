@@ -1,0 +1,248 @@
+name: build-asset
+
+# Triggered by the Cloudflare Worker (repository_dispatch) or by hand from the
+# GitHub UI / mobile app (workflow_dispatch).
+on:
+  repository_dispatch:
+    types: [build-asset]
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id — runs jobs/<job_id>.json"
+        required: false
+        default: "sample"
+
+permissions:
+  contents: write # commit the output to the `assets` branch
+
+concurrency:
+  # one build per job id; different jobs may run in parallel
+  group: build-asset-${{ github.event.client_payload.job_id || github.event.inputs.job_id || 'sample' }}
+  cancel-in-progress: false
+
+env:
+  # bump BOTH values together when mirroring a new Blender LTS release
+  BLENDER_VERSION: "4.2.3"
+  BLENDER_DIR: "blender-4.2.3-linux-x64"
+  ASSETS_BRANCH: "assets"
+
+jobs:
+  build:
+    name: blender · worker.py
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve and validate job id
+        id: job
+        env:
+          RAW_JOB: ${{ github.event.client_payload.job_id || github.event.inputs.job_id || 'sample' }}
+        run: |
+          set -euo pipefail
+          JOB="$RAW_JOB"
+          if ! printf '%s' "$JOB" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,40}$'; then
+            echo "::error::invalid job_id '$JOB' (expected ^[a-z0-9][a-z0-9_-]{0,40}$)"
+            exit 1
+          fi
+          if [ ! -f "jobs/$JOB.json" ]; then
+            echo "::error::jobs/$JOB.json not found"
+            ls -l jobs || true
+            exit 1
+          fi
+          echo "job_id=$JOB" >> "$GITHUB_OUTPUT"
+          echo "asset_id=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("asset_id",""))' "jobs/$JOB.json")" >> "$GITHUB_OUTPUT"
+          echo "resolved job_id=$JOB"
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: .blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64-v1
+
+      - name: Install Blender system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 xz-utils
+
+      - name: Download Blender ${{ env.BLENDER_VERSION }} LTS
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .blender
+          cd .blender
+          URLS=(
+            "https://download.blender.org/release/Blender4.2/${BLENDER_DIR}.tar.xz"
+            "https://mirror.clarkson.edu/blender/release/Blender4.2/${BLENDER_DIR}.tar.xz"
+            "https://ftp.nluug.nl/pub/graphics/blender/release/Blender4.2/${BLENDER_DIR}.tar.xz"
+          )
+          ok=0
+          for u in "${URLS[@]}"; do
+            echo "trying $u"
+            if curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -o b.tar.xz "$u"; then
+              ok=1; break
+            fi
+            rm -f b.tar.xz
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::could not download Blender ${BLENDER_VERSION} from any mirror"
+            exit 1
+          fi
+          tar -xf b.tar.xz
+          rm -f b.tar.xz
+          test -x "${BLENDER_DIR}/blender"
+          echo "blender ready: $(./${BLENDER_DIR}/blender --version | head -n 1)"
+
+      - name: Run worker.py
+        id: run
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+        run: |
+          set -uo pipefail
+          BLENDER=".blender/${BLENDER_DIR}/blender"
+          if [ ! -x "$BLENDER" ]; then
+            echo "::error::blender binary missing after cache/download"
+            exit 1
+          fi
+          export BLENDER_USER_CONFIG=/tmp/blender-config
+          set +e
+          "$BLENDER" --background --factory-startup --python-exit-code 1 \
+            --python worker.py -- "jobs/${JOB}.json" \
+            --out /tmp/out.glb --result /tmp/result.json 2>&1 | tee /tmp/blender.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "worker_exit=$RC" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f /tmp/result.json ]; then
+            # fall back to the last single-line JSON the worker printed
+            grep -E '^\{.*\}$' /tmp/blender.log | tail -n 1 > /tmp/result.json || true
+          fi
+          if [ ! -s /tmp/result.json ]; then
+            echo '{"ok":false,"applied":[],"errors":[{"op":"__run__","error":"no result produced"}],"warnings":[]}' > /tmp/result.json
+          fi
+
+          APPLIED=$(python3 -c 'import json;print(len(json.load(open("/tmp/result.json")).get("applied") or []))')
+          ERRORS=$(python3 -c 'import json;print(len(json.load(open("/tmp/result.json")).get("errors") or []))')
+          echo "applied=$APPLIED" >> "$GITHUB_OUTPUT"
+          echo "errors=$ERRORS" >> "$GITHUB_OUTPUT"
+
+          echo "--- result ---"
+          python3 -m json.tool /tmp/result.json || true
+
+          if [ "$APPLIED" -eq 0 ]; then
+            echo "::error::no ops were applied — see errors above"
+            exit 1
+          fi
+          if [ "$RC" -eq 3 ]; then
+            echo "::error::worker hit its 120s self-timeout"
+            exit 1
+          fi
+
+      - name: Publish to ${{ env.ASSETS_BRANCH }} branch
+        id: publish
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          WORKTREE=/tmp/assets-tree
+          rm -rf "$WORKTREE"
+          git fetch --depth 1 origin "${ASSETS_BRANCH}" 2>/dev/null || true
+
+          if git rev-parse --verify --quiet "refs/remotes/origin/${ASSETS_BRANCH}" >/dev/null; then
+            git worktree add --detach "$WORKTREE" "origin/${ASSETS_BRANCH}"
+          else
+            echo "assets branch does not exist yet — creating it"
+            git worktree add --detach "$WORKTREE" HEAD
+            (
+              cd "$WORKTREE"
+              git checkout --orphan assets-orphan-init
+              find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+              printf '# generated GLBs\n\nBuild outputs: out_<job_id>.glb (do not edit by hand)\n' > README.md
+            )
+          fi
+
+          cp /tmp/out.glb "$WORKTREE/out_${JOB}.glb"
+          cd "$WORKTREE"
+          git add -A
+          git commit -m "asset: out_${JOB}.glb (job ${JOB})"
+          git push origin "HEAD:${ASSETS_BRANCH}"
+          SIZE=$(stat -c%s "out_${JOB}.glb")
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "pushed out_${JOB}.glb (${SIZE} bytes)"
+
+      - name: Purge jsDelivr cache (best effort)
+        if: always() && steps.publish.outcome == 'success'
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          curl -fsS "https://purge.jsdelivr.net/gh/${REPO}@${ASSETS_BRANCH}/out_${JOB}.glb" >/dev/null || true
+          curl -fsS "https://purge.jsdelivr.net/gh/${REPO}@${ASSETS_BRANCH}/" >/dev/null || true
+
+      - name: Job summary
+        if: always()
+        env:
+          JOB: ${{ steps.job.outputs.job_id }}
+          ASSET: ${{ steps.job.outputs.asset_id }}
+          REPO: ${{ github.repository }}
+          PUBLISHED: ${{ steps.publish.outcome }}
+          SIZE: ${{ steps.publish.outputs.size }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          job = os.environ.get("JOB", "?")
+          repo = os.environ.get("REPO", "owner/repo")
+          published = os.environ.get("PUBLISHED") == "success"
+          size = os.environ.get("SIZE") or "0"
+          try:
+              r = json.load(open("/tmp/result.json"))
+          except Exception:
+              r = {"applied": [], "errors": [{"error": "no result"}], "warnings": []}
+
+          lines = []
+          lines.append("## build-asset — `%s`" % job)
+          lines.append("")
+          lines.append("| field | value |")
+          lines.append("| --- | --- |")
+          lines.append("| asset | `%s` |" % os.environ.get("ASSET", "?"))
+          lines.append("| worker ok | %s |" % ("✅" if r.get("ok") else "❌"))
+          lines.append("| applied | %d |" % len(r.get("applied") or []))
+          lines.append("| errors | %d |" % len(r.get("errors") or []))
+          lines.append("| output | %s |" % ("`out_%s.glb` (%s bytes)" % (job, size) if published else "not published"))
+          lines.append("| seconds | %s |" % r.get("seconds", "?"))
+          if r.get("license"):
+              lines.append("| license | `%s` |" % r["license"])
+          lines.append("")
+          lines.append("**CDN**")
+          lines.append("```")
+          lines.append("https://cdn.jsdelivr.net/gh/%s@assets/out_%s.glb" % (repo, job))
+          lines.append("```")
+
+          applied = r.get("applied") or []
+          if applied:
+              lines.append("**Applied**")
+              for a in applied:
+                  lines.append("- `%s` — `%s`" % (a.get("op"), json.dumps(a.get("result"), ensure_ascii=False)[:300]))
+          errors = r.get("errors") or []
+          if errors:
+              lines.append("**Errors**")
+              for e in errors:
+                  lines.append("- `%s` — %s" % (e.get("op"), e.get("error")))
+          warnings = r.get("warnings") or []
+          if warnings:
+              lines.append("**Warnings**")
+              for w in warnings:
+                  lines.append("- %s" % w)
+          print("\n".join(lines))
+          PY
