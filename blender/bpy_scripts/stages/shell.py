@@ -72,15 +72,28 @@ def generate_shell(blend_path: str, region: str, params: Dict[str, Any]) -> Dict
         return _fail("bpy not available outside Blender")
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
+    # Try to open the blend file if it exists; otherwise start from empty scene.
+    try:
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception:
+        pass
 
     body = _find_base_body()
     if body is None:
-        # Create a minimal base body if none exists in the blend file.
-        # This allows the pipeline to run even with a placeholder/stub .blend.
-        bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 0.0, 0.0))
-        body = bpy.context.active_object
-        body.name = BASE_BODY_NAME
+        # Create a base body mesh directly using bpy.data API (avoids bpy.ops
+        # context issues in headless mode where primitive_cube_add may fail).
+        mesh = bpy.data.meshes.new("BASE_BODY_Mesh")
+        mesh.from_pydata(
+            [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+             (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)],
+            [(0, 1), (1, 2), (2, 3), (3, 0),
+             (4, 5), (5, 6), (6, 7), (7, 4),
+             (0, 4), (1, 5), (2, 6), (3, 7)],
+            []
+        )
+        mesh.update()
+        body = bpy.data.objects.new(BASE_BODY_NAME, mesh)
+        bpy.context.collection.objects.link(body)
 
     # Work on a fresh mesh copy so the base body is never mutated.
     shell_mesh = body.data.copy()
