@@ -72,16 +72,17 @@ The suite above runs in CI against the **`studio-site` artifact** — the exact
 bytes that `deploy` then uploads to Pages — so a green `webtest` is a green
 deploy candidate, not a different build.
 
-Run [43251111914](https://github.com/adii14990adi-spec/Blender/actions/runs/43251111914)
-(PR #8) and, after merge, the `main` run of `Build & Deploy Studio`:
+Run [43260251009](https://github.com/adii14990adi-spec/Blender/actions/runs/43260251009)
+(PR #10) and, after merge, [43261262632](https://github.com/adii14990adi-spec/Blender/actions/runs/43261262632)
+on `main`:
 
 | Job | Result |
 | --- | --- |
 | `Detect changed areas` | pass |
-| `Build <variant> · <outfit>` ×4 | pass (real Blender 5.0, exports validated, Khronos 0/0) |
+| `Build <variant> · <outfit>` ×6 | pass (real Blender 5.0, exports validated, Khronos 0/0) |
 | `Assemble studio` | pass (`site OK: docs`, every manifest path present) |
-| `Browser tests` | pass (Khronos over the served manifest + 14/14 Chromium scenarios) |
-| `Deploy studio to Pages` | pass — deployment `7742124813`, environment `https://adii14990adi-spec.github.io/Blender/` |
+| `Browser tests` | pass (Khronos over the served manifest + 14/14 Chromium scenarios, 3-outfit library) |
+| `Deploy studio to Pages` | pass — deployment `7743497030`, environment `https://adii14990adi-spec.github.io/Blender/` |
 
 `deploy` re-checks `index.html`, `manifest.json`, the vendored viewer and every
 GLB/FBX/preview path after stripping `.blend*`, so a partially assembled site
