@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "generated_at": "2026-01-01T00:00:00Z",
+  "generator": "tests/fixtures (synthetic)",
+  "pipeline_version": "fixture",
+  "characters": [{ "id": "male", "label": "Male" }],
+  "outfits": [
+    {
+      "id": "animated_cube",
+      "name": "Animated Cube (fixture)",
+      "kind": "test",
+      "region": "TEST",
+      "compatibility": ["male"],
+      "variants": {
+        "male": {
+          "variant": "male",
+          "outfit": "animated_cube",
+          "label": "Animated Cube (fixture)",
+          "glb": { "path": "fixtures/animated.glb", "bytes": 4284, "size": "4.2 KB" },
+          "fbx": null,
+          "preview": null,
+          "validation": { "path": null, "status": "pass", "stages": [], "pipeline_version": "fixture" },
+          "stats": { "triangles": 12, "vertices": 8, "materials": 1, "joints": null, "animations": 1 },
+          "built_at": "2026-01-01 00:00 UTC"
+        }
+      }
+    }
+  ]
+}

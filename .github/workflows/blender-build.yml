@@ -1,9 +1,14 @@
-name: Build & Deploy Assets
+name: Build & Deploy Studio
 
 # Production build: runs the real Blender 5.0 pipeline for both body variants,
 # validates every exported FBX/GLB (project inspectors + Khronos glTF
-# Validator), writes a build report and only then deploys the *validated*
-# assets to GitHub Pages. A failed or incomplete build publishes nothing.
+# Validator), renders the outfit thumbnails, assembles the web studio
+# (tools/build_site.py → docs/: frontend + assets + manifest.json), drives a real
+# Chromium through the studio, and only then deploys to GitHub Pages.
+#
+# A frontend-only change (web_viewer/, docs/, workflow files) still republishes
+# the site: the last validated assets are restored from the Actions cache instead
+# of rebuilding the garments. A failed or incomplete build publishes nothing.
 
 on:
   push:
@@ -13,13 +18,29 @@ on:
       - "assets/**"
       - "tools/**"
       - "web_viewer/**"
+      - "docs/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - "pyproject.toml"
       - ".github/workflows/blender-build.yml"
       - ".github/actions/**"
+  pull_request:
+    paths:
+      - "blender/**"
+      - "assets/**"
+      - "tools/**"
+      - "web_viewer/**"
+      - "docs/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/blender-build.yml"
   workflow_dispatch:
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: false
+  group: studio-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -27,8 +48,59 @@ permissions:
   id-token: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # What actually changed? Frontend-only pushes skip the Blender matrix and
+  # restore the previous validated exports from the Actions cache.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.classify.outputs.backend }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Classify the diff
+        run: |
+          set -euo pipefail
+          backend=true
+          reason="manual or unknown change - rebuilding assets"
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.event.before }}" ] \
+             && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            if git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
+              git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" > changed.txt
+              echo "changed files:"; sed 's/^/  /' changed.txt
+              backend=false
+              while IFS= read -r file; do
+                case "$file" in
+                  web_viewer/*|docs/*|tests/fixtures/*|.github/workflows/*|README.md|"") ;;
+                  *) backend=true ;;
+                esac
+              done < changed.txt
+              if [ "${backend}" = "false" ]; then
+                reason="frontend-only change - reusing cached assets"
+              else
+                reason="pipeline inputs changed - rebuilding assets"
+              fi
+            else
+              reason="base commit unavailable - rebuilding assets"
+            fi
+          fi
+          echo "backend=${backend}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          echo "backend=${backend} (${reason})"
+
+  # ---------------------------------------------------------------------------
+  # Blender pipeline per body variant. Produces the only shippable artifacts:
+  # validated GLB/FBX + validation report + preview thumbnail.
+  # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.variant }}
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -36,8 +108,12 @@ jobs:
         include:
           - variant: male
             outfit: jacket_urban_01
+          - variant: male
+            outfit: parka_urban_01
           - variant: female
             outfit: jacket_urban_01
+          - variant: female
+            outfit: parka_urban_01
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,18 +136,18 @@ jobs:
           echo "base body: ${BODY}"
           head -c 7 "${BODY}" | grep -q BLENDER || { echo "::error::${BODY} is not a Blender file"; exit 1; }
 
-      - name: Run pipeline (${{ matrix.variant }})
+      - name: Run pipeline (${{ matrix.variant }} / ${{ matrix.outfit }})
         run: |
           set -euo pipefail
           blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
             --stage full \
             --variant ${{ matrix.variant }} \
             --outfit ${{ matrix.outfit }} \
-            --out "/tmp/build_${{ matrix.variant }}.json"
+            --out "/tmp/build_${{ matrix.variant }}_${{ matrix.outfit }}.json"
 
       - name: Show pipeline report
         if: always()
-        run: cat "/tmp/build_${{ matrix.variant }}.json" 2>/dev/null || echo "(no build JSON)"
+        run: cat "/tmp/build_${{ matrix.variant }}_${{ matrix.outfit }}.json" 2>/dev/null || echo "(no build JSON)"
 
       - name: Validate exports
         run: |
@@ -80,96 +156,201 @@ jobs:
             --outfit ${{ matrix.outfit }} \
             --variant ${{ matrix.variant }} \
             --khronos \
-            --json "/tmp/exports_${{ matrix.variant }}.json"
+            --json "/tmp/exports_${{ matrix.variant }}_${{ matrix.outfit }}.json"
+
+      - name: Render outfit thumbnail
+        run: |
+          set -euo pipefail
+          python tools/render_previews.py \
+            --variant ${{ matrix.variant }} \
+            --outfit ${{ matrix.outfit }} \
+            --force
 
       - name: Upload validated assets
         uses: actions/upload-artifact@v4
         with:
-          name: assets-${{ matrix.variant }}
+          name: assets-${{ matrix.variant }}-${{ matrix.outfit }}
           # Only shippable artifacts (never the .blend checkpoints).
           path: |
             outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.fbx
             outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.glb
             outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.json
+            outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.png
           if-no-files-found: error
 
-  report:
-    name: Build report
-    needs: build
+  # ---------------------------------------------------------------------------
+  # Site assembly: frontend + assets + manifest.json → docs/ (the Pages root).
+  # ---------------------------------------------------------------------------
+  site:
+    name: Assemble studio
+    needs: [changes, build]
+    if: always() && (needs.build.result == 'success' || needs.changes.outputs.backend != 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/download-artifact@v4
-        with:
-          name: assets-male
-          path: downloads/male
-      - uses: actions/download-artifact@v4
-        with:
-          name: assets-female
-          path: downloads/female
 
-      - name: Generate reports
+      - name: Collect freshly built assets
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: assets-*
+          path: downloads
+
+      - name: Restore previously validated assets
+        if: needs.changes.outputs.backend != 'true'
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: outputs
+          key: assets-v1-${{ github.run_id }}
+          restore-keys: assets-v1-
+
+      - name: Lay out the export tree
         run: |
           set -euo pipefail
-          python tools/build_report.py \
-            --run "male=downloads/male/validation_report.json" \
-            --run "female=downloads/female/validation_report.json" \
-            --out reports/BUILD_REPORT.md \
-            --json reports/build_report.json
+          if [ -d downloads ]; then
+            # artifacts land in downloads/assets-<variant>-<outfit>/<files>
+            for dir in downloads/assets-*; do
+              name="${dir#downloads/assets-}"
+              variant="${name%%-*}"
+              outfit="${name#*-}"
+              mkdir -p "outputs/${variant}/${outfit}"
+              cp -v "${dir}"/* "outputs/${variant}/${outfit}/"
+            done
+          fi
+          if [ ! -d outputs ] || [ -z "$(find outputs -name '*.glb' -print -quit)" ]; then
+            echo "::error::No GLB exports available - nothing to publish. Re-run with a pipeline build (workflow_dispatch)."
+            exit 1
+          fi
+          find outputs -type f | sort
+
+      - name: Assemble the site (frontend + assets + manifest)
+        run: |
+          set -euo pipefail
+          python tools/build_site.py --out docs --json /tmp/site.json
+          echo "--- manifest ---"
+          python - <<'PY'
+          import json
+          manifest = json.load(open("docs/manifest.json"))
+          flat = [
+              (o["id"], v, e["glb"]["path"], e["validation"]["status"])
+              for o in manifest["outfits"]
+              for v, e in o["variants"].items()
+          ]
+          print(f"{len(manifest['characters'])} characters, {len(manifest['outfits'])} outfits, {len(flat)} builds")
+          for outfit, variant, glb, status in flat:
+              print(f"  {outfit:<20} {variant:<7} {status:<6} {glb}")
+          PY
+
+      - name: Validate every manifest path
+        run: |
+          set -euo pipefail
+          python tools/build_site.py --out docs --check-only
+
+      - name: Refresh the build report
+        run: |
+          set -euo pipefail
+          MALE=outputs/male/jacket_urban_01/validation_report.json
+          FEMALE=outputs/female/jacket_urban_01/validation_report.json
+          if [ -f "${MALE}" ] && [ -f "${FEMALE}" ]; then
+            python tools/build_report.py --run "male=${MALE}" --run "female=${FEMALE}" \
+              --out docs/BUILD_REPORT.md --json docs/build_report.json
+          else
+            echo "::notice::validation reports missing - keeping the committed BUILD_REPORT.md"
+          fi
+
+      - name: Cache the validated export tree
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: outputs
+          key: assets-v1-${{ github.run_id }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: build-reports
-          path: reports/
+          name: studio-site
+          path: docs
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Real-browser regression suite against the assembled site.
+  # ---------------------------------------------------------------------------
+  webtest:
+    name: Browser tests
+    needs: site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@v4
+        with:
+          name: studio-site
+          path: docs
+      - name: Install browser tooling
+        run: npm ci --no-audit --no-fund
+      - name: Khronos-validate every GLB the studio serves
+        run: |
+          set -euo pipefail
+          node tools/gltf_validate.js --manifest docs/manifest.json \
+            | tee docs/gltf-validation.jsonl
+      - name: Drive the studio in Chromium
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          node tools/browser_test.mjs --site docs --shots docs/screenshots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-screenshots
+          path: |
+            docs/screenshots/
+            docs/browser-test-results.json
+            docs/gltf-validation.jsonl
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Publish. Only ever to main (PRs build + test the same bytes, never deploy).
+  # ---------------------------------------------------------------------------
   deploy:
-    name: Deploy validated assets to Pages
-    needs: [build, report]
+    name: Deploy studio to Pages
+    needs: [site, webtest]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
-          name: assets-male
-          path: site/outputs/male/jacket_urban_01
-      - uses: actions/download-artifact@v4
-        with:
-          name: assets-female
-          path: site/outputs/female/jacket_urban_01
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-reports
-          path: site/reports
-
+          name: studio-site
+          path: site
       - name: Re-validate what is about to be published
         run: |
           set -euo pipefail
-          for variant in male female; do
-            echo "== re-validating ${variant} =="
-            python tools/validate_exports.py \
-              "site/outputs/${variant}/jacket_urban_01/jacket_urban_01_Modular.glb" \
-              "site/outputs/${variant}/jacket_urban_01/jacket_urban_01_Modular.fbx" \
-              --require-skin
-          done
-
-      - name: Assemble Pages site
-        run: |
-          set -euo pipefail
-          cp web_viewer/index.html site/index.html
-          # Only export artifacts are published - never .blend checkpoints.
+          test -f site/index.html
+          test -f site/manifest.json
+          test -f site/vendor/model-viewer.min.js
+          test -d site/outputs
           find site -name "*.blend*" -delete
-          find site -type f | sort
-
+          python3 - <<'PY'
+          import json, os
+          manifest = json.load(open("site/manifest.json"))
+          missing = []
+          for outfit in manifest["outfits"]:
+              for variant, entry in outfit["variants"].items():
+                  for key in ("glb", "fbx", "preview"):
+                      item = entry.get(key)
+                      if item and not os.path.isfile(os.path.join("site", item["path"])):
+                          missing.append(item["path"])
+          if missing:
+              raise SystemExit("missing from the deploy: " + ", ".join(missing))
+          print(f"deploying {len(manifest['outfits'])} outfits, all paths present")
+          PY
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

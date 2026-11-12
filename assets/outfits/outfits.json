@@ -53,6 +53,53 @@
         "assets/references/jacket_urban_01/side.png",
         "assets/references/jacket_urban_01/back.png"
       ]
+    },
+    "parka_urban_01": {
+      "display_name": "Parka Urban 01",
+      "region": "UPPER_BODY",
+      "garment_type": "parka",
+      "coverage": {
+        "top": 0.178,
+        "bottom": 0.61
+      },
+      "sleeves": {
+        "length": 0.8,
+        "cuff_inset": 0.94
+      },
+      "opening": "front",
+      "opening_width": 0.03,
+      "offset": {
+        "default": 0.013,
+        "hem_extra": 0.006,
+        "collar_extra": 0.002,
+        "sleeve_extra": 0.004
+      },
+      "thickness": 0.007,
+      "fit": "relaxed",
+      "material": {
+        "name": "MAT_Cloth_parka_urban_01",
+        "base_color": [
+          0.13,
+          0.22,
+          0.19,
+          1.0
+        ],
+        "roughness": 0.86,
+        "metallic": 0.0,
+        "normal_strength": 1.0,
+        "textures": {
+          "base_color": "assets/textures/parka_urban_01/basecolor.png",
+          "normal": "assets/textures/parka_urban_01/normal.png",
+          "roughness": "assets/textures/parka_urban_01/roughness.png",
+          "metallic": "assets/textures/parka_urban_01/metallic.png"
+        },
+        "procedural": {
+          "enabled": true,
+          "resolution": 512,
+          "weave_cells": 32,
+          "height_amplitude": 0.5
+        }
+      }
     }
   }
 }

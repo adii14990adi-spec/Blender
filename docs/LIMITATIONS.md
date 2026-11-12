@@ -12,10 +12,17 @@ body variants; nothing is speculation.
   hem is a horizontal cut, and there are no darts, pleats, gathers, lapels or
   collars. A tailored look needs a real pattern (sewn panels with seam lines)
   or a sculpted garment — both outside what this pipeline generates.
-* **One outfit, one length scale.** `jacket_urban_01` is the only authored
-  outfit. `assets/outfits/outfits.json` is the extension point (`coverage`,
-  `offsets`, `thickness`, opening width); a full wardrobe still needs per-outfit
-  tuning and validation.
+* **Two outfits, both cut from the body.** `jacket_urban_01` (hip length) and
+  `parka_urban_01` (longer, roomier, heavier sleeve offset) are built from the
+  same panel logic; only `coverage`, `offsets`, `thickness` and `materials`
+  differ in `assets/outfits/outfits.json`. Any further outfit needs its own
+  tuning **and** its own clearance/distortion validation — the offsets do not
+  generalise for free.
+* **The GLBs contain the garment only.** No body mesh is exported, so the web
+  studio shows the garment as a free-standing asset (the thumbnails render it on
+  the mannequin because they are rendered from the `.blend`). That is deliberate:
+  a body in every GLB would roughly double the download and is not what a
+  garment asset is.
 * **Shoulders read as slightly puffy** in the male build: the sleeve cut is a
   plane, so the shoulder corner keeps body-like volume. Adjacent edges are
   smooth (max distortion ≈ 1–2×), but a tailor would cut the shoulder seam.

@@ -51,9 +51,12 @@ assets/outfits/        outfits.json (region, coverage, offsets, thickness, mater
 assets/textures/       per-outfit PBR slots (generated set is gitignored)
 tests/unit/            pure-Python tests (no Blender)
 tests/integration/     real pipeline runs inside Blender 5.0
-tools/                 run_headless.py, validate_exports.py, build_report.py, gltf_validate.js
-web_viewer/            model-viewer review page (male/female switch)
-docs/                  pipeline reference, limitations, build report
+tools/                 run_headless.py, validate_exports.py, build_report.py,
+                       build_site.py, render_previews.py, serve_viewer.py,
+                       browser_test.mjs, gltf_validate.js
+web_viewer/            the 3D studio frontend (index.html, css/, js/, vendored model-viewer)
+docs/                  pipeline reference, limitations, build report + the assembled
+                       Pages site (index.html, manifest.json, outputs/) at deploy time
 ```
 
 ## Quick start
@@ -72,8 +75,8 @@ python tools/run_headless.py --variant male --outfit jacket_urban_01 --stage ful
 blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
   --stage full --variant female --out /tmp/build_female.json
 
-#    ...or preview the review page exactly as Pages serves it
-python tools/serve_viewer.py --port 8099
+#    ...or assemble and preview the web studio exactly as Pages serves it
+python tools/serve_viewer.py --port 8099    # builds docs/ then serves it
 
 # 3) validate the artifacts (structure + Khronos validator)
 python tools/validate_exports.py --outfit jacket_urban_01 --variant male --khronos
@@ -88,7 +91,15 @@ python tools/build_report.py --run male=/tmp/build.json --out docs/BUILD_REPORT.
 # 5) tests
 pytest tests/unit -q          # no Blender needed
 pytest tests -q               # includes the real pipeline (needs bpy)
+
+# 6) web studio
+python tools/build_site.py --out docs          # frontend + assets + manifest.json
+python tools/render_previews.py                # thumbnails for the outfit library
+node tools/browser_test.mjs --site docs        # real-browser suite + screenshots
 ```
+
+The studio is described in [`docs/WEB_VIEWER.md`](docs/WEB_VIEWER.md), its test
+report in [`docs/WEB_TESTING.md`](docs/WEB_TESTING.md).
 
 Outputs land in `outputs/<variant>/<outfit>/`:
 
@@ -129,16 +140,27 @@ rejected explicitly. A build that cannot produce a valid asset fails.
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci.yml` | PR, push to `main`, manual | `lint` (ruff check + format) · `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
-| `blender-build.yml` | push to `main`, manual | Builds both variants, validates every FBX/GLB, generates `BUILD_REPORT.md`, and deploys **only validated export artifacts** to GitHub Pages |
+| `blender-build.yml` | push to `main`, PR, manual | `changes` (skips Blender for frontend-only pushes and reuses cached exports) · `build` (matrix: 2 characters × 2 outfits, real Blender 5.0, validated exports + Khronos, rendered thumbnails) · `site` (assembles `docs/`, generates and path-validates `manifest.json`) · `webtest` (Chromium suite) · `deploy` (GitHub Pages, `main` only) |
 
 The PR gate fails when a base body is missing or a Git-LFS pointer — it never
 skips itself green.
 
 ### GitHub Pages
 
-Enable **Settings → Pages → Source: GitHub Actions**. The review page
-(`web_viewer/index.html`) lets you switch between the male and female builds and
-shows the stage status from the build's `validation_report.json`.
+Enable **Settings → Pages → Source: GitHub Actions**. The studio
+(`https://<user>.github.io/<repo>/`) is the assembled site: relative asset paths
+throughout, so it works from a project subpath. It ships
+
+- a male/female character switch that swaps GLBs without a reload,
+- an outfit library generated from `manifest.json` (currently
+  `jacket_urban_01` and `parka_urban_01`, each for both characters),
+- GLB/FBX downloads with real sizes, plus per-stage validation status,
+- fullscreen, camera presets, auto-rotate and animation transport when clips
+  exist.
+
+`web_viewer/` holds only authored sources; `docs/` is assembled by
+`tools/build_site.py` in CI (the generated files are gitignored, so the repo
+never accumulates binaries).
 
 ## Troubleshooting
 
