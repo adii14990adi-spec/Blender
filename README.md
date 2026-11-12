@@ -124,7 +124,7 @@ rejected explicitly. A build that cannot produce a valid asset fails.
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | PR, push to `main`, manual | `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
+| `ci.yml` | PR, push to `main`, manual | `lint` (ruff check + format) · `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
 | `blender-build.yml` | push to `main`, manual | Builds both variants, validates every FBX/GLB, generates `BUILD_REPORT.md`, and deploys **only validated export artifacts** to GitHub Pages |
 
 The PR gate fails when a base body is missing or a Git-LFS pointer — it never
