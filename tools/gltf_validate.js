@@ -115,7 +115,9 @@ async function main() {
     failed,
     warnings: totalWarnings,
   };
-  console.log(JSON.stringify({ summary }));
+  // Per-file results own stdout (callers parse them one JSON object per line);
+  // the roll-up goes to stderr so single-file output stays a single object.
+  console.error(JSON.stringify({ summary }));
   process.exit(failed > 0 ? 1 : 0);
 }
 
