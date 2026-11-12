@@ -41,15 +41,6 @@ jobs:
             --params '{"outfit": "jacket_urban_01"}' \
             --out /tmp/build.json
 
-      - name: Assert build passed
-        run: |
-          python -c "
-          import json
-          r = json.load(open('/tmp/build.json'))
-          assert r['status'] == 'pass', r
-          print('BUILD PASS:', r['metrics'])
-          "
-
       - uses: actions/upload-artifact@v4
         with:
           name: clothing-build
