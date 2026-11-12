@@ -36,6 +36,12 @@ def _create_simple_cube_and_export(outfit: str, fbx_path: str, glb_path: str) ->
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
+    # Enable glTF exporter add-on.
+    try:
+        bpy.ops.preferences.addon_enable(module="io_scene_gltf2")
+    except Exception:
+        pass  # May already be enabled
+
     # Create a simple cube mesh.
     mesh = bpy.data.meshes.new("ClothShell")
     mesh.from_pydata(
