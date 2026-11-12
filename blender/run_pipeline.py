@@ -3,10 +3,11 @@
 Invoked by GitHub Actions:
 
     blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
-        --stage validate \
+        --stage full \
         --blend assets/base_body/BASE_BODY.blend \
         --region UPPER_BODY \
-        --out /tmp/validation.json
+        --params '{"outfit": "jacket_urban_01"}' \
+        --out /tmp/build.json
 
 Each stage saves its own .blend checkpoint under outputs/<outfit>/ so the
 pipeline is resumable.
@@ -45,7 +46,19 @@ REPO_ROOT = BLENDER_DIR.parent
 if str(BLENDER_DIR) not in sys.path:
     sys.path.insert(0, str(BLENDER_DIR))
 
-STAGES = ("validate", "all", "shell", "shrinkwrap", "weights", "uv", "material", "export")
+# "full" is the documented name for the whole run; "all" is kept as an alias.
+FULL_RUN_ALIASES = ("full", "all")
+STAGES = (
+    "validate",
+    "full",
+    "all",
+    "shell",
+    "shrinkwrap",
+    "weights",
+    "uv",
+    "material",
+    "export",
+)
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
@@ -208,11 +221,12 @@ def _run_stage(stage: str, blend: str, region: str, params: Dict[str, Any]) -> D
         detail = f"{exc.__class__.__name__}: {exc}"
         result["metrics"]["error"] = f"failed to import bpy_scripts.pipeline: {detail}"
         result["metrics"]["traceback"] = traceback.format_exc()
+        traceback.print_exc()  # show the real stack in the CI log
         result["error"] = result["metrics"]["error"]
         return result
 
     try:
-        if stage == "all":
+        if stage in FULL_RUN_ALIASES:
             res = pipeline.run_full_pipeline(blend, region, params)
         else:
             res = pipeline.run_stage(stage, blend, region, params)
@@ -220,6 +234,7 @@ def _run_stage(stage: str, blend: str, region: str, params: Dict[str, Any]) -> D
         detail = f"{exc.__class__.__name__}: {exc}"
         result["metrics"]["error"] = detail
         result["metrics"]["traceback"] = traceback.format_exc()
+        traceback.print_exc()  # a pipeline bug must be visible in the CI log
         result["error"] = detail
         return result
 
@@ -314,4 +329,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:  # last-resort guard so Blender never exits 0 on a crash
+        traceback.print_exc()
+        sys.exit(1)

@@ -28,7 +28,7 @@ make validate
 make test
 
 # Full pipeline + FBX/GLB export (stage chaining, see below)
-make build OUTFIT=jacket_urban_01
+make build OUTFIT=jacket_urban_01          # = --stage full
 
 # Lint + non-Blender tests (import wiring, CLI contract)
 ruff check blender tests agent
@@ -50,8 +50,10 @@ Each stage opens the newest checkpoint written before it
 (`outputs/<outfit>/00_shell.blend` → `01_shrinkwrapped.blend` →
 `02_weighted.blend` → `03_uv_material.blend`) and saves its own checkpoint, so a
 failed run is resumable and `--stage shrinkwrap` re-uses stage 1's output. Metrics
-record `input.input_source` (`checkpoint` or `base_blend`) so it is visible in the
-run log which artifact was consumed.
+record `input.input_source` (`checkpoint` or `base_blend`) and
+`input_blend` (the exact file the stage was handed) so the run log shows which
+artifact was consumed. `--stage full` (alias `--stage all`) runs the whole chain
+and stops at the first failure.
 
 ## CI
 
@@ -103,3 +105,21 @@ docker build -t ghcr.io/<org>/blender5-headless:5.0.0 -f docker/Dockerfile.blend
 ```
 
 Never use `:latest` in production workflows — bpy API drift will silently break the pipeline.
+
+## Blender 5.0 headless risk audit
+
+| # | Risk | State here |
+|---|---|---|
+| R1 | `except Exception: pass` around `bpy.ops.wm.open_mainfile` hides a missing/corrupt file | Fixed — every stage fails with `could not open <path>: <error>` |
+| R2 | A failed `bpy.ops.export_scene.fbx` wrote a fake 12-byte FBX and still returned `pass` | Fixed — a failed FBX/GLB export fails the stage; no stub files are written |
+| R3 | Git LFS pointer instead of a real `.blend` | Detected in `run_pipeline.py` (magic header check) and printed by the "Inspect base body asset" CI step |
+| R4 | Operators needing a UI context / active object | Export stage links the shell into the active view layer, falls back to direct deselection, and `mode_set` is never required; only `blender -b` is used, no window ops |
+| R5 | Object names (`CLOTH_Shell`, `BASE_BODY`) assumed after load | Export stage logs `[o.name for o in bpy.data.objects]` and returns the list in failure metrics; shell stage fails if `BASE_BODY` is absent (blockout is opt-in) |
+| R6 | Relative `outputs/` vs `REPO_ROOT/outputs` | Fixed — every path goes through `bpy_scripts/utils/paths.py`; `run_pipeline.py` checks the GLB under `REPO_ROOT/outputs/<outfit>/` |
+| R7 | A fallback GLB reaching GitHub Pages | Fixed — fallback requires `--allow-fallback-glb` and is flagged; the build asserts `glb_is_fallback` is false and size > 1 KB before Pages setup |
+| R8 | Node 20 deprecation on `actions/checkout@v4` | Cosmetic, no action needed |
+
+Everything bpy-specific above is guarded and lint-checked, but it is **not
+executed in this repo's test suite** — the pipeline code paths only run inside
+real Blender (CI). `pytest` covers the import wiring, CLI exit codes and stage
+chaining with mocked stages.

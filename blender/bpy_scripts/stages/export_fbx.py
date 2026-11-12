@@ -60,6 +60,15 @@ def _find(name: str):
     return None
 
 
+def _ensure_linked(obj: "bpy.types.Object") -> None:
+    """Selection operators need the object in the active view layer (headless)."""
+    try:
+        if obj.name not in bpy.context.view_layer.objects:  # type: ignore[attr-defined]
+            bpy.context.collection.objects.link(obj)  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - context dependent
+        logger.warning("could not link %s into the active collection", obj.name)
+
+
 def _filter_supported_kwargs(op: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Drop kwargs the installed Blender's exporter does not know about.
 
@@ -124,8 +133,14 @@ def export_fbx(shell: "bpy.types.Object", outfit: str, fbx_path: str) -> Dict[st
     }
 
     try:
-        # Deselect everything, select only the shell.
-        bpy.ops.object.select_all(action="DESELECT")
+        # Deselect everything, select only the shell. In -b there is no UI
+        # context, so fall back to deselecting objects directly.
+        _ensure_linked(shell)
+        try:
+            bpy.ops.object.select_all(action="DESELECT")
+        except Exception:  # pragma: no cover - no objects / no context
+            for obj in bpy.context.view_layer.objects:
+                obj.select_set(False)
         shell.select_set(True)
         bpy.context.view_layer.objects.active = shell
         bpy.ops.export_scene.fbx(**_filter_supported_kwargs(bpy.ops.export_scene.fbx, unity_kwargs))
@@ -307,9 +322,15 @@ def run(
     except Exception as exc:
         return _fail(f"could not open {input_path}: {exc}", {"input": input_info})
 
+    object_names = [obj.name for obj in bpy.data.objects]
+    logger.info("opened %s: %d objects %s", input_path, len(object_names), object_names)
+
     shell = _find(SHELL_OBJECT_NAME)
     if shell is None:
-        return _fail("CLOTH_Shell not found — run all prior stages first", {"input": input_info})
+        return _fail(
+            "CLOTH_Shell not found — run all prior stages first",
+            {"input": input_info, "objects": object_names},
+        )
 
     # FBX export for Unity.
     op_result = export_fbx(shell, outfit, fbx_path)

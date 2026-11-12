@@ -152,14 +152,30 @@ def run_full_pipeline(
     region: str = "UPPER_BODY",
     params: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Run all stages in order; stop at the first failure (guardrail)."""
-    params = params or {}
+    """Run all stages in order, chaining checkpoints; stop at the first failure.
+
+    Stage N+1 opens the checkpoint stage N saved (``last["checkpoint"]``), not
+    the base body again — otherwise shrinkwrap/weights/uv/export can never see
+    the ``CLOTH_Shell`` object created by stage 1.
+
+    ``params["outfit"]`` is pinned up front: without it a stage would derive the
+    outfit name from the checkpoint filename (``01_shrinkwrapped``) and write to
+    the wrong ``outputs/`` folder.
+    """
+    params = dict(params or {})
     outfit = params.get("outfit") or _outfit_from_blend(blend)
-    params = {**params, "outfit": outfit}  # every stage writes to the same outfit
+    params["outfit"] = outfit
+
+    current_blend = blend
     last: Dict[str, Any] = {"status": "pass"}
     for stage in STAGE_ORDER:
-        last = run_stage(stage, blend, region, params)
-        last["outfit"] = outfit
+        stage_result = run_stage(stage, current_blend, region, params)
+        stage_result.setdefault("metrics", {})
+        if isinstance(stage_result["metrics"], dict):
+            stage_result["metrics"]["input_blend"] = current_blend
+        stage_result["outfit"] = outfit
+        last = stage_result
         if last.get("status") != "pass":
             break
+        current_blend = last.get("checkpoint") or current_blend
     return last

@@ -18,7 +18,7 @@ validate: ## Run the validate stage only (PR gate)
 
 build: ## Run the full pipeline end-to-end and export FBX + GLB
 	$(BLEND) -b --python-exit-code 1 --python blender/run_pipeline.py -- \
-		--stage all \
+		--stage full \
 		--blend $(BASE) \
 		--region $(REGION) \
 		--params "{\"outfit\": \"$(OUTFIT)\"}" \

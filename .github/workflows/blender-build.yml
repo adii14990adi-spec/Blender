@@ -32,16 +32,33 @@ jobs:
           rm -f blender-5.0.0-linux-x64.tar.xz
           blender --version
 
+      # Git LFS pointers look like 130-byte text files; a real .blend starts
+      # with the "BLENDER" magic. Print both so LFS/asset problems are obvious.
+      - name: Inspect base body asset
+        run: |
+          ls -la assets/base_body/
+          head -c 64 assets/base_body/BASE_BODY.blend | od -c | head -4
+
       - name: Run full pipeline and export FBX/GLB
         run: |
           # --python-exit-code 1 makes Blender fail the step on an uncaught
           # Python error instead of exiting 0.
           blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
-            --stage all \
+            --stage full \
             --blend assets/base_body/BASE_BODY.blend \
             --region UPPER_BODY \
             --params '{"outfit": "jacket_urban_01"}' \
             --out /tmp/build.json
+
+      # The blender step now exits non-zero on failure, so the assert below may
+      # never run — dump the failure JSON so the reason is visible in the log.
+      - name: Show build result on failure
+        if: failure()
+        run: |
+          echo "--- /tmp/build.json ---"
+          cat /tmp/build.json 2>/dev/null || echo "(no build.json written)"
+          echo "--- outputs/ ---"
+          ls -laR outputs 2>/dev/null || true
 
       - name: Assert build produced outputs
         run: |
