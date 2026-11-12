@@ -26,7 +26,14 @@ except ImportError:  # pragma: no cover
     bpy = None  # type: ignore[assignment]
     _HAS_BPY = False
 
-from ..config import ConfigError, load_outfit, resolve_variant
+from ..config import (
+    ConfigError,
+    load_outfit,
+    material_spec,
+    outfit_details,
+    outfit_pieces,
+    resolve_variant,
+)
 from ..utils.bpy_helpers import (
     PipelineError,
     find_mesh_object,
@@ -39,6 +46,7 @@ from ..utils.logging import get_logger
 from ..utils.paths import checkpoint_path, ensure_dir, outfit_dir
 from ..utils.textures import (
     build_material,
+    build_material_nodes,
     pack_images,
     resolve_textures,
     verify_texture_set,
@@ -49,6 +57,8 @@ logger = get_logger("stages.uv_material")
 STAGE_INDEX = 3
 STAGE_NAME = "uv_material"
 GARMENT_OBJECT_NAME = "CLOTH_Shell"
+PIECE_META_KEY = "garment_pieces"
+DETAIL_META_KEY = "garment_details"
 UV_LAYER_NAME = "UVMap"
 MIN_UV_COVERAGE = 0.02
 
@@ -183,6 +193,126 @@ def unwrap(garment, params: Dict[str, Any]) -> Dict[str, Any]:
     return report
 
 
+def _material_plan(settings: Dict[str, Any], outfit: str) -> List[Dict[str, Any]]:
+    """One entry per material the outfit needs (single-garment outfits get one)."""
+    pieces = outfit_pieces(settings)
+    plan: List[Dict[str, Any]] = []
+    seen = set()
+    for piece in pieces:
+        material = piece["material"]
+        if material["name"] in seen:
+            continue
+        seen.add(material["name"])
+        plan.append(
+            {
+                "key": piece["key"],
+                "label": piece.get("label"),
+                "material": material,
+                "owner": "piece",
+            }
+        )
+    for detail in outfit_details(settings, pieces):
+        material = detail["material"]
+        if material["name"] in seen:
+            continue
+        seen.add(material["name"])
+        plan.append(
+            {
+                "key": detail["id"],
+                "label": detail["id"].replace("_", " ").title(),
+                "material": material,
+                "owner": "detail",
+            }
+        )
+    for key, raw in (settings.get("materials") or {}).items():
+        material = material_spec(raw or {}, outfit, key)
+        if material["name"] in seen:
+            continue
+        seen.add(material["name"])
+        plan.append({"key": key, "label": key.title(), "material": material, "owner": "material"})
+    return plan
+
+
+def _apply_piece_materials(garment, plan, uv, variant, outfit: str) -> Dict[str, Any]:
+    """Build one textured material per piece and keep the shell's slot order."""
+    by_name = {entry["material"]["name"]: entry for entry in plan}
+    slots = [slot.material.name if slot.material else None for slot in garment.material_slots]
+    unknown = [name for name in slots if name and name not in by_name]
+    if unknown:
+        return _fail(
+            "the garment carries material slots no outfit definition owns: "
+            + ", ".join(sorted(unknown)),
+            {"uv": uv, "material_slots": slots},
+        )
+
+    reports: List[Dict[str, Any]] = []
+    for slot in garment.material_slots:
+        material = slot.material
+        if material is None:  # pragma: no cover - shell always assigns one
+            return _fail("a material slot on the garment is empty", {"uv": uv})
+        entry = by_name[material.name]
+        spec = entry["material"]
+        try:
+            textures = resolve_textures(f"{outfit}_{entry['key']}", spec)
+        except (FileNotFoundError, ValueError) as exc:
+            return _fail(f"texture resolution failed for {material.name}: {exc}", {"uv": uv})
+        built = build_material_nodes(material, textures["paths"], spec)
+        check = verify_texture_set(textures["paths"], built.get("images_by_slot"))
+        if not check["ok"]:
+            return _fail(
+                f"textures for {material.name} are unusable: " + "; ".join(check["problems"]),
+                {"uv": uv, "textures": check},
+            )
+        missing = [key for key, present in built["texture_nodes"].items() if not present]
+        if missing:
+            return _fail(
+                f"{material.name} is missing texture nodes: {', '.join(missing)}", {"uv": uv}
+            )
+        reports.append(
+            {
+                "name": material.name,
+                "key": entry["key"],
+                "owner": entry["owner"],
+                "texture_nodes": built["texture_nodes"],
+                "images": built["images"],
+                "provenance": textures["provenance"],
+                "base_color": spec.get("base_color"),
+                "roughness": spec.get("roughness"),
+                "metallic": spec.get("metallic"),
+                "textures": check,
+            }
+        )
+
+    packed = pack_images()
+    main = reports[0]
+    metrics = {
+        "uv": uv,
+        "material": {
+            "name": main["name"],
+            "texture_nodes": main["texture_nodes"],
+            "images": main["images"],
+            "provenance": main["provenance"],
+            "packed_images": packed,
+            "base_color": main["base_color"],
+            "roughness": main["roughness"],
+            "metallic": main["metallic"],
+        },
+        "textures": main["textures"],
+        "material_count": len(reports),
+        "materials": [
+            {key: value for key, value in report.items() if key != "textures"} for report in reports
+        ],
+        "garment_stats": mesh_stats(garment),
+        "variant": variant.name,
+    }
+    logger.info(
+        "built %d piece materials (%s)",
+        len(reports),
+        ", ".join(report["name"] for report in reports),
+    )
+    return {"status": "pass", "stage": STAGE_NAME, "metrics": metrics, "checkpoint": None}
+
+
 def material_checkpoint(
     blend_path: str, region: str, params: Dict[str, Any], outfit: str
 ) -> Dict[str, Any]:
@@ -219,6 +349,10 @@ def material_checkpoint(
         )
     if uv["uv_layer_count"] != 1:
         return _fail(f"expected exactly one UV layer, found {uv['uv_layer_count']}", {"uv": uv})
+
+    plan = _material_plan(settings, outfit)
+    if len(plan) > 1:
+        return _apply_piece_materials(garment, plan, uv, variant, outfit)
 
     material_settings = settings.get("material") or {}
     try:
@@ -259,6 +393,7 @@ def material_checkpoint(
             "metallic": material_settings.get("metallic"),
         },
         "textures": texture_check,
+        "material_count": 1,
         "garment_stats": mesh_stats(garment),
         "variant": variant.name,
     }

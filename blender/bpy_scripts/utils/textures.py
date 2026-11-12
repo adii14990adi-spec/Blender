@@ -209,6 +209,27 @@ def build_material(
     material = bpy.data.materials.get(material_name)  # type: ignore[union-attr]
     if material is None:
         material = bpy.data.materials.new(material_name)  # type: ignore[union-attr]
+    report = build_material_nodes(material, texture_paths, settings)
+
+    # Assign as the only material slot so the export cannot pick a stale one.
+    shell.data.materials.clear()
+    shell.data.materials.append(material)
+    for polygon in shell.data.polygons:
+        polygon.material_index = 0
+    return report
+
+
+def build_material_nodes(
+    material,
+    texture_paths: Dict[str, str],
+    settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """(Re)build the PBR node graph of ``material`` in place.
+
+    Used both for the single-garment path (:func:`build_material`) and for the
+    per-piece materials of a multi-piece outfit, where the slot assignment was
+    decided by the shell stage and must not be touched here.
+    """
     material.use_nodes = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
@@ -261,12 +282,6 @@ def build_material(
         )
     bsdf.inputs["Roughness"].default_value = float(settings.get("roughness", 0.8))
     bsdf.inputs["Metallic"].default_value = float(settings.get("metallic", 0.0))
-
-    # Assign as the only material slot so the export cannot pick a stale one.
-    shell.data.materials.clear()
-    shell.data.materials.append(material)
-    for polygon in shell.data.polygons:
-        polygon.material_index = 0
 
     return {
         "material": material,

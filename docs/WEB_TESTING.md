@@ -35,14 +35,21 @@ Khronos glTF Validator over the published manifest:
 | `jacket_urban_01` | male | 0 | 0 | 7 830 | yes | 4 |
 | `parka_urban_01` | female | 0 | 0 | 9 628 | yes | 4 |
 | `parka_urban_01` | male | 0 | 0 | 8 732 | yes | 4 |
+| `tactical_loadout_01` | female | 0 | 0 | 16 008 | yes | 4 |
+| `tactical_loadout_01` | male | 0 | 0 | 15 792 | yes | 4 |
 
 ```text
-{"summary":{"validated":4,"failed":0,"warnings":0}}
+{"summary":{"validated":6,"failed":0,"warnings":0}}
 ```
+
+`tactical_loadout_01` is the multi-piece build: one skinned mesh, six materials
+(tee, cargo, webbing, boot, gear, patch) and 18 packed maps, so it exercises the
+viewer with a much heavier asset (2.9 MB, 16k triangles) than the single-material
+jackets.
 
 | # | Scenario | Notes |
 | --- | --- | --- |
-| 1 | mobile · shell renders from the manifest | 2 characters · 2 outfits · pill `2/2 validated` |
+| 1 | mobile · shell renders from the manifest | 2 characters · 3 outfits · pill `3/3 validated` |
 | 2 | mobile · GLB loads and renders | `outputs/male/jacket_urban_01/…glb` → 394 × 401 viewport |
 | 3 | mobile · character switch without a reload | JS marker survives, `src` → `outputs/female/…` |
 | 4 | mobile · outfit library switches builds | `jacket_urban_01` → `parka_urban_01` |
@@ -105,7 +112,7 @@ suite (and uploaded as the `studio-screenshots` CI artifact).
 | Opens on Android Chrome | Chromium (same engine) with a Pixel-class 412 × 915 viewport and Android UA; mobile layout assertions (tab bar visible, sidebar hidden) pass |
 | GLB loads | Scenarios 2, 3, 4, 13 — `model-viewer` reports `loaded` and `modelIsVisible` |
 | Male/female selection | Scenario 3, plus compatibility chips and per-character asset paths |
-| Multiple outfits | Scenario 4 and 12 — `jacket_urban_01` **and** `parka_urban_01`, both characters |
+| Multiple outfits | Scenario 4 and 12 — `jacket_urban_01`, `parka_urban_01` **and** the six-material `tactical_loadout_01`, both characters |
 | Rotate and zoom | `camera-controls` + touch handling; camera reset/orbit assertions in scenario 6 |
 | Animation controls | Scenario 9 (fixture GLB with a clip); static exports hide the control by design |
 | GLB + FBX downloads | Scenario 7 — real HEAD 200s, relative paths, sizes from the manifest |

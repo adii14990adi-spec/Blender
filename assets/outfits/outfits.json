@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "description": "Outfit definitions consumed by the garment stage. Coverage values are fractions of body height measured from the top of the head (0.0) to the soles (1.0), which keeps one definition valid for both body variants.",
+  "schema_version": 3,
+  "description": "Outfit definitions consumed by the garment stage. Coverage values are fractions of body height measured from the top of the head (0.0) to the soles (1.0), which keeps one definition valid for both body variants. An outfit is either a single garment (coverage/sleeves at the top level) or a set of `pieces` - each with its own region, coverage, standoff, thickness and material - plus optional hard `details` (pouches, pads, buckles) anchored to body landmarks.",
   "outfits": {
     "jacket_urban_01": {
       "display_name": "Urban Jacket 01",
@@ -98,6 +98,379 @@
           "resolution": 512,
           "weave_cells": 32,
           "height_amplitude": 0.5
+        }
+      }
+    },
+    "tactical_loadout_01": {
+      "display_name": "Tactical Loadout 01",
+      "region": "MULTI",
+      "garment_type": "loadout",
+      "fit": "regular",
+      "defaults": {
+        "offset": {
+          "default": 0.011,
+          "hem_extra": 0.006,
+          "collar_extra": 0.002,
+          "sleeve_extra": 0.004
+        },
+        "thickness": 0.005
+      },
+      "pieces": {
+        "tee": {
+          "label": "Combat tee",
+          "region": "UPPER_BODY",
+          "coverage": {
+            "top": 0.183,
+            "bottom": 0.462
+          },
+          "sleeves": {
+            "length": 0.28,
+            "cuff_inset": 0.92
+          },
+          "opening": "closed",
+          "offset": {
+            "default": 0.009,
+            "hem_extra": 0.004,
+            "collar_extra": 0.001,
+            "sleeve_extra": 0.003
+          },
+          "thickness": 0.0035,
+          "fit": "regular",
+          "material": {
+            "name": "MAT_Cloth_tactical_tee",
+            "base_color": [
+              0.115,
+              0.125,
+              0.07,
+              1.0
+            ],
+            "roughness": 0.92,
+            "metallic": 0.0,
+            "normal_strength": 1.0,
+            "procedural": {
+              "enabled": true,
+              "resolution": 512,
+              "weave_cells": 84,
+              "height_amplitude": 0.22
+            }
+          }
+        },
+        "cargo": {
+          "label": "Cargo trousers",
+          "region": "LOWER_BODY",
+          "coverage": {
+            "top": 0.462,
+            "bottom": 0.925
+          },
+          "offset": {
+            "default": 0.014,
+            "hem_extra": 0.004
+          },
+          "thickness": 0.006,
+          "fit": "relaxed",
+          "material": {
+            "name": "MAT_Cloth_tactical_cargo",
+            "base_color": [
+              0.3,
+              0.232,
+              0.12,
+              1.0
+            ],
+            "roughness": 0.88,
+            "metallic": 0.0,
+            "normal_strength": 1.0,
+            "procedural": {
+              "enabled": true,
+              "resolution": 512,
+              "weave_cells": 44,
+              "height_amplitude": 0.42
+            }
+          },
+          "fit_mode": "shell"
+        },
+        "belt": {
+          "label": "Duty belt",
+          "region": "ACCESSORY",
+          "coverage": {
+            "top": 0.462,
+            "bottom": 0.498
+          },
+          "offset": {
+            "default": 0.032
+          },
+          "thickness": 0.007,
+          "material": {
+            "name": "MAT_Cloth_tactical_webbing",
+            "base_color": [
+              0.08,
+              0.08,
+              0.084,
+              1.0
+            ],
+            "roughness": 0.8,
+            "metallic": 0.0,
+            "normal_strength": 1.0,
+            "procedural": {
+              "enabled": true,
+              "resolution": 256,
+              "weave_cells": 96,
+              "height_amplitude": 0.5
+            }
+          },
+          "fit_params": {
+            "iterations": 1,
+            "relax_iterations": 0
+          },
+          "fit_mode": "shell"
+        },
+        "boots": {
+          "label": "Combat boots",
+          "region": "FOOTWEAR",
+          "coverage": {
+            "top": 0.885,
+            "bottom": 0.997
+          },
+          "offset": {
+            "default": 0.026,
+            "hem_extra": 0.002
+          },
+          "thickness": 0.008,
+          "material": {
+            "name": "MAT_Cloth_tactical_boot",
+            "base_color": [
+              0.08,
+              0.081,
+              0.09,
+              1.0
+            ],
+            "roughness": 0.46,
+            "metallic": 0.0,
+            "normal_strength": 1.0,
+            "procedural": {
+              "enabled": true,
+              "resolution": 256,
+              "weave_cells": 40,
+              "height_amplitude": 0.6
+            }
+          },
+          "fit_params": {
+            "iterations": 1,
+            "relax_iterations": 1
+          },
+          "fit_mode": "shell"
+        }
+      },
+      "details": [
+        {
+          "id": "belt_buckle",
+          "anchor": "waist",
+          "side": "center",
+          "size": [
+            0.1,
+            0.022,
+            0.06
+          ],
+          "material": "belt",
+          "gap": 0.03,
+          "face": "front"
+        },
+        {
+          "id": "pouch_left",
+          "anchor": "waist",
+          "side": "left",
+          "size": [
+            0.075,
+            0.052,
+            0.115
+          ],
+          "material": "gear",
+          "gap": 0.018,
+          "z_offset": -0.018,
+          "rounding": 0.22,
+          "face": "outer"
+        },
+        {
+          "id": "pouch_right",
+          "anchor": "waist",
+          "side": "right",
+          "size": [
+            0.075,
+            0.052,
+            0.115
+          ],
+          "material": "gear",
+          "gap": 0.018,
+          "z_offset": -0.018,
+          "rounding": 0.22,
+          "face": "outer"
+        },
+        {
+          "id": "pouch_back_left",
+          "anchor": "hip",
+          "side": "left",
+          "size": [
+            0.085,
+            0.045,
+            0.085
+          ],
+          "material": "gear",
+          "gap": 0.017,
+          "z_offset": -0.03,
+          "rounding": 0.25,
+          "face": "back"
+        },
+        {
+          "id": "pouch_back_right",
+          "anchor": "hip",
+          "side": "right",
+          "size": [
+            0.085,
+            0.045,
+            0.085
+          ],
+          "material": "gear",
+          "gap": 0.017,
+          "z_offset": -0.03,
+          "rounding": 0.25,
+          "face": "back"
+        },
+        {
+          "id": "cargo_pocket_left",
+          "anchor": "thigh",
+          "side": "left",
+          "size": [
+            0.1,
+            0.03,
+            0.15
+          ],
+          "material": "cargo",
+          "gap": 0.017,
+          "rounding": 0.18,
+          "face": "outer"
+        },
+        {
+          "id": "cargo_pocket_right",
+          "anchor": "thigh",
+          "side": "right",
+          "size": [
+            0.1,
+            0.03,
+            0.15
+          ],
+          "material": "cargo",
+          "gap": 0.017,
+          "rounding": 0.18,
+          "face": "outer"
+        },
+        {
+          "id": "knee_pad_left",
+          "anchor": "knee",
+          "side": "left",
+          "size": [
+            0.13,
+            0.042,
+            0.165
+          ],
+          "material": "gear",
+          "gap": 0.019,
+          "rounding": 0.45,
+          "face": "front",
+          "x_range": [
+            0.45,
+            0.8
+          ]
+        },
+        {
+          "id": "knee_pad_right",
+          "anchor": "knee",
+          "side": "right",
+          "size": [
+            0.13,
+            0.042,
+            0.165
+          ],
+          "material": "gear",
+          "gap": 0.019,
+          "rounding": 0.45,
+          "face": "front",
+          "x_range": [
+            0.45,
+            0.8
+          ]
+        },
+        {
+          "id": "holster_right",
+          "anchor": "thigh",
+          "side": "right",
+          "size": [
+            0.06,
+            0.045,
+            0.175
+          ],
+          "material": "gear",
+          "gap": 0.022,
+          "z_offset": -0.055,
+          "rounding": 0.2,
+          "tilt_deg": -6.0,
+          "face": "outer"
+        },
+        {
+          "id": "chest_patch",
+          "anchor": "chest",
+          "side": "left",
+          "face": "front",
+          "size": [
+            0.075,
+            0.006,
+            0.055
+          ],
+          "material": "patch",
+          "gap": 0.012,
+          "rounding": 0.3
+        }
+      ],
+      "materials": {
+        "gear": {
+          "name": "MAT_Cloth_tactical_gear",
+          "base_color": [
+            0.088,
+            0.094,
+            0.076,
+            1.0
+          ],
+          "roughness": 0.66,
+          "metallic": 0.0,
+          "normal_strength": 1.0,
+          "textures": {
+            "base_color": "assets/textures/tactical_loadout_01/gear_basecolor.png",
+            "normal": "assets/textures/tactical_loadout_01/gear_normal.png",
+            "roughness": "assets/textures/tactical_loadout_01/gear_roughness.png",
+            "metallic": "assets/textures/tactical_loadout_01/gear_metallic.png"
+          },
+          "procedural": {
+            "enabled": true,
+            "resolution": 256,
+            "weave_cells": 64,
+            "height_amplitude": 0.5
+          }
+        },
+        "patch": {
+          "name": "MAT_Cloth_tactical_patch",
+          "base_color": [
+            0.22,
+            0.15,
+            0.05,
+            1.0
+          ],
+          "roughness": 0.55,
+          "metallic": 0.0,
+          "normal_strength": 1.0,
+          "procedural": {
+            "enabled": true,
+            "resolution": 256,
+            "weave_cells": 160,
+            "height_amplitude": 0.5
+          }
         }
       }
     }
