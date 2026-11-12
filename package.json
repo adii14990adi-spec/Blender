@@ -1,0 +1,12 @@
+{
+  "name": "modular-clothing-pipeline-tools",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Validation tooling for the headless Blender clothing pipeline",
+  "scripts": {
+    "validate:gltf": "node tools/gltf_validate.js"
+  },
+  "devDependencies": {
+    "gltf-validator": "2.0.0-dev.3.10"
+  }
+}

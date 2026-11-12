@@ -66,7 +66,7 @@ def test_no_relative_import_escapes_the_package() -> None:
 @pytest.mark.unit
 def test_run_pipeline_bootstraps_bpy_scripts() -> None:
     """``blender/run_pipeline.py`` puts ``blender/`` on sys.path itself."""
-    import run_pipeline  # noqa: PLC0415 - imported for its side effects
+    import run_pipeline  # imported for its side effects (sys.path bootstrap)
 
     assert run_pipeline.BLENDER_DIR == BLENDER_DIR
     assert str(BLENDER_DIR) in __import__("sys").path

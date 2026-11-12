@@ -1,330 +1,230 @@
-"""Headless Blender entry point.
+"""Headless Blender entry point for the modular clothing pipeline.
 
-Invoked by GitHub Actions:
+    blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \\
+        --variant female --outfit jacket_urban_01 --stage full --out /tmp/build.json
 
-    blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
-        --stage full \
-        --blend assets/base_body/BASE_BODY.blend \
-        --region UPPER_BODY \
-        --params '{"outfit": "jacket_urban_01"}' \
-        --out /tmp/build.json
-
-Each stage saves its own .blend checkpoint under outputs/<outfit>/ so the
-pipeline is resumable.
+Body variant and outfit are resolved through the manifests
+(``assets/base_body/manifest.json``, ``assets/outfits/outfits.json``); the old
+hard-coded ``assets/base_body/BASE_BODY.blend`` is gone.
 
 Exit codes
 ----------
-0   every requested stage passed
-1   a stage failed, a module failed to import, or an input was unusable
+0   every requested stage passed **and** the exported artifacts validated
+1   a stage failed, an input was unusable, or an export failed validation
 
-The failure detail is always written to ``--out`` as JSON before exiting, so CI
-can print it. Pass ``--allow-fallback-glb`` if a placeholder GLB should be
-written when Blender fails (flagged with ``glb_is_fallback: true``); it is off
-by default so a broken build never ships a fake asset.
+The failure detail is always written to ``--out`` as JSON before exiting. A
+placeholder GLB is never written: a broken build must look broken.
 """
 
 from __future__ import annotations
 
+# ruff: noqa: PLC0415  (bpy_scripts imports stay lazy: the module must import
+# outside Blender so argument parsing and --list-assets work without bpy.)
 import json
 import os
-import struct
 import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-# --- import bootstrap --------------------------------------------------------
-# Blender runs this file as a top-level script (``__main__``), so there is no
-# parent package for relative imports to resolve against. Put ``blender/`` on
-# ``sys.path`` and use absolute ``bpy_scripts.*`` imports everywhere. Never add
-# the repo root here too: importing the same module as both ``bpy_scripts.x``
-# and ``blender.bpy_scripts.x`` is what triggers
-# "attempted relative import beyond top-level package".
 BLENDER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BLENDER_DIR.parent
 if str(BLENDER_DIR) not in sys.path:
     sys.path.insert(0, str(BLENDER_DIR))
 
-# "full" is the documented name for the whole run; "all" is kept as an alias.
 FULL_RUN_ALIASES = ("full", "all")
-STAGES = (
-    "validate",
-    "full",
-    "all",
-    "shell",
-    "shrinkwrap",
-    "weights",
-    "uv",
-    "material",
-    "export",
-)
-ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+BOOLEAN_FLAGS = {
+    "--allow-fallback-glb": ("allow_fallback_glb", True),  # accepted, then rejected
+    "--list-assets": ("list_assets", True),
+}
+VALUE_FLAGS = {
+    "--stage": "stage",
+    "--region": "region",
+    "--blend": "blend",
+    "--variant": "variant",
+    "--outfit": "outfit",
+    "--params": "params",
+    "--out": "out",
+    "--body-manifest": "body_manifest",
+    "--outfit-manifest": "outfit_manifest",
+}
 
 
-def _minimal_glb(out_path: str) -> str:
-    """Write a minimal valid GLB (empty cube) using pure Python, no bpy."""
-    # Minimal GLB: a single cube mesh with 8 vertices, 12 triangles.
-    # Header + JSON chunk + BIN chunk.
-    json_bytes = json.dumps(
-        {
-            "asset": {"version": "2.0", "generator": "Modular Clothing Pipeline"},
-            "scene": 0,
-            "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0}],
-            "meshes": [
-                {"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}
-            ],
-            "accessors": [
-                {
-                    "bufferView": 0,
-                    "componentType": 5126,
-                    "count": 8,
-                    "type": "VEC3",
-                    "max": [1, 1, 1],
-                    "min": [-1, -1, -1],
-                },
-                {"bufferView": 1, "componentType": 5123, "count": 36, "type": "SCALAR"},
-            ],
-            "bufferViews": [
-                {"buffer": 0, "byteOffset": 0, "byteLength": 96},
-                {"buffer": 0, "byteOffset": 96, "byteLength": 72},
-            ],
-            "buffers": [{"byteLength": 168}],
-            "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.8, 0.8, 1]}}],
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    # Pad JSON to 4-byte alignment.
-    json_padded = json_bytes + b" " * ((4 - len(json_bytes) % 4) % 4)
-
-    # Binary data: vertex positions + indices.
-    positions = []
-    for x in (-1.0, 1.0):
-        for y in (-1.0, 1.0):
-            for z in (-1.0, 1.0):
-                positions.extend([x, y, z])
-    pos_bytes = struct.pack("<24f", *positions)
-    indices = []
-    # 12 triangles (2 per face)
-    faces = [
-        (0, 1, 2, 1, 3, 2),  # front
-        (4, 6, 5, 6, 7, 5),  # back
-        (0, 4, 5, 0, 5, 1),  # bottom
-        (2, 3, 7, 2, 7, 6),  # top
-        (0, 2, 6, 0, 6, 4),  # left
-        (1, 5, 7, 1, 7, 3),  # right
-    ]
-    for f in faces:
-        indices.extend(f)
-    idx_bytes = struct.pack("<36H", *indices)
-
-    bin_data = pos_bytes + idx_bytes
-    bin_padded = bin_data + b"\x00" * ((4 - len(bin_data) % 4) % 4)
-
-    # GLB header.
-    header = struct.pack("<4sII", b"glTF", 2, 12 + len(json_padded) + 8 + len(bin_padded))
-
-    # JSON chunk.
-    json_chunk = struct.pack("<II", len(json_padded), 0x4E4F534A) + json_padded
-
-    # BIN chunk.
-    bin_chunk = struct.pack("<II", len(bin_padded), 0x004E4942) + bin_padded
-
-    glb_bytes = header + json_chunk + bin_chunk
-
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(glb_bytes)
-    return out_path
-
-
-def _parse_args(argv: list[str]) -> Dict[str, Any]:
-    """Parse argv manually (no argparse to avoid exit-on-error issues)."""
-    args = {
+def _parse_args(argv: List[str]) -> Dict[str, Any]:
+    args: Dict[str, Any] = {
         "stage": "validate",
-        "region": "UPPER_BODY",
+        "region": "",
         "blend": "",
+        "variant": "",
+        "outfit": "",
         "params": "{}",
         "out": "/tmp/result.json",
+        "body_manifest": "",
+        "outfit_manifest": "",
+        "list_assets": False,
         "allow_fallback_glb": False,
     }
-    flag_for = {
-        "--stage": "stage",
-        "--region": "region",
-        "--blend": "blend",
-        "--params": "params",
-        "--out": "out",
-    }
-
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--allow-fallback-glb":
-            args["allow_fallback_glb"] = True
-            i += 1
-        elif arg in flag_for and i + 1 < len(argv):
-            args[flag_for[arg]] = argv[i + 1]
-            i += 2
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in BOOLEAN_FLAGS:
+            key, value = BOOLEAN_FLAGS[arg]
+            args[key] = value
+            index += 1
+        elif arg in VALUE_FLAGS and index + 1 < len(argv):
+            args[VALUE_FLAGS[arg]] = argv[index + 1]
+            index += 2
         else:
-            i += 1
+            index += 1
     return args
 
 
-def _check_blend(blend: str) -> str | None:
-    """Return an actionable error string when ``blend`` is not a usable .blend."""
-    if not blend:
-        return "--blend was not provided"
-    if not os.path.exists(blend):
-        return f"base body not found: {blend}"
-    if not os.path.isfile(blend):
-        return f"--blend is not a file: {blend}"
+def _resolve_inputs(args: Dict[str, Any]) -> "tuple[Any, Dict[str, Any], str]":
+    """Resolve manifest paths, variant and outfit into validated objects."""
+    from bpy_scripts import config
 
-    with open(blend, "rb") as fh:
-        head = fh.read(8)
-    # Real .blend files start with the magic header, or are zstd-compressed
-    # (Blender 3.0+ "Compress" saves).
-    if head.startswith(b"BLENDER") or head.startswith(ZSTD_MAGIC):
-        return None
-    return (
-        f"{blend} is not a real .blend file (got {os.path.getsize(blend)} bytes, "
-        f"header {head!r}). It is probably still the committed placeholder stub — "
-        "export a real BASE_BODY.blend from Blender and track it with Git LFS."
-    )
+    body_manifest = args["body_manifest"] or None
+    outfit_manifest = args["outfit_manifest"] or None
+    if body_manifest:
+        config.BODY_MANIFEST = os.path.abspath(body_manifest)
+    if outfit_manifest:
+        config.OUTFIT_MANIFEST = os.path.abspath(outfit_manifest)
+
+    variant = config.resolve_variant(args["variant"], body_manifest)
+    outfit = args["outfit"] or config.outfit_names(outfit_manifest)[0]
+    settings = config.load_outfit(outfit, outfit_manifest)
+    return variant, settings, outfit
 
 
-def _run_stage(stage: str, blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def _blend_from_variant(variant, explicit: str) -> str:
+    if explicit:
+        return os.path.abspath(explicit)
+    return variant.path
+
+
+def _resolve_stage(stage: str) -> str:
+    from bpy_scripts.pipeline import STAGE_ORDER, canonical_stage
+
+    if stage in FULL_RUN_ALIASES or stage == "validate":
+        return stage
+    canonical = canonical_stage(stage)
+    if canonical is None:
+        raise ValueError(
+            f"unknown stage {stage!r}; expected one of: full, validate, "
+            + ", ".join(STAGE_ORDER)
+            + " (aliases: garment, subdivide, uv, material, export_fbx)"
+        )
+    return canonical
+
+
+def _run(stage: str, blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    from bpy_scripts import pipeline
+
+    if stage in FULL_RUN_ALIASES:
+        return pipeline.run_full_pipeline(blend, region, params)
+    return pipeline.run_stage(stage, blend, region, params)
+
+
+def main(argv: List[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args["list_assets"]:
+        from bpy_scripts import config
+
+        print("variants:", ", ".join(config.variant_names(args["body_manifest"] or None)))
+        print("outfits:", ", ".join(config.outfit_names(args["outfit_manifest"] or None)))
+        return 0
+
     result: Dict[str, Any] = {
         "status": "fail",
-        "stage": stage,
-        "region": region,
+        "stage": args["stage"],
+        "region": args["region"],
+        "outfit": args["outfit"],
+        "variant": args["variant"],
         "metrics": {},
         "checkpoint": None,
-        "outfit": "",
         "error": None,
     }
-
-    # Resolve the outfit name the same way the pipeline reports do.
-    outfit = params.get("outfit") or os.path.splitext(os.path.basename(blend))[0] or "outfit"
-    result["outfit"] = outfit
-
-    blend_error = _check_blend(blend)
-    if blend_error:
-        result["metrics"]["error"] = blend_error
-        result["error"] = blend_error
-        return result
-
-    try:
-        from bpy_scripts import pipeline  # noqa: PLC0415 - import after sys.path setup
-    except Exception as exc:  # pragma: no cover - depends on Blender runtime
-        detail = f"{exc.__class__.__name__}: {exc}"
-        result["metrics"]["error"] = f"failed to import bpy_scripts.pipeline: {detail}"
-        result["metrics"]["traceback"] = traceback.format_exc()
-        traceback.print_exc()  # show the real stack in the CI log
-        result["error"] = result["metrics"]["error"]
-        return result
-
-    try:
-        if stage in FULL_RUN_ALIASES:
-            res = pipeline.run_full_pipeline(blend, region, params)
-        else:
-            res = pipeline.run_stage(stage, blend, region, params)
-    except Exception as exc:  # pipeline bug: report it, do not swallow it
-        detail = f"{exc.__class__.__name__}: {exc}"
-        result["metrics"]["error"] = detail
-        result["metrics"]["traceback"] = traceback.format_exc()
-        traceback.print_exc()  # a pipeline bug must be visible in the CI log
-        result["error"] = detail
-        return result
-
-    result["status"] = res.get("status", "fail")
-    result["metrics"] = res.get("metrics", {})
-    result["checkpoint"] = res.get("checkpoint")
-    result["outfit"] = res.get("outfit", outfit)
-    if result["status"] != "pass":
-        result["error"] = (
-            res.get("error") or result["metrics"].get("error") or "pipeline returned fail"
-        )
-    return result
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
-    stage = args["stage"]
-    blend = args["blend"]
-    region = args["region"]
     out = args["out"]
+    started = time.time()
 
     try:
-        params = json.loads(args["params"])
-        if not isinstance(params, dict):
-            raise TypeError("--params must be a JSON object")
-    except Exception as exc:
-        params = {}
-        params_error = f"ignored invalid --params: {exc}"
-    else:
-        params_error = None
+        stage = _resolve_stage(args["stage"])
+        variant, settings, outfit = _resolve_inputs(args)
+        blend = _blend_from_variant(variant, args["blend"])
+        region = args["region"] or settings.get("region") or "UPPER_BODY"
 
-    if stage not in STAGES:
-        result: Dict[str, Any] = {
-            "status": "fail",
-            "stage": stage,
-            "region": region,
-            "metrics": {},
-            "checkpoint": None,
-            "outfit": params.get("outfit", ""),
-            "error": f"unknown stage {stage!r}; expected one of {', '.join(STAGES)}",
-        }
-    else:
-        started = time.time()
-        result = _run_stage(stage, blend, region, params)
-        if params_error:
-            result["metrics"]["params_warning"] = params_error
+        try:
+            params = json.loads(args["params"] or "{}")
+            if not isinstance(params, dict):
+                raise TypeError("--params must be a JSON object")
+        except Exception as exc:
+            raise ValueError(f"invalid --params: {exc}") from exc
 
-        outfit = result["outfit"] or params.get("outfit") or "outfit"
-        glb_path = os.path.join(REPO_ROOT, "outputs", outfit, f"{outfit}_Modular.glb")
-
-        if result["status"] == "pass" and os.path.exists(glb_path):
-            result["metrics"].update(
-                {
-                    "glb_path": str(glb_path),
-                    "glb_file_size_bytes": os.path.getsize(glb_path),
-                    "glb_is_fallback": False,
-                }
+        params.setdefault("outfit", outfit)
+        params.setdefault("variant", variant.name)
+        params.update(
+            {
+                "outfit": outfit,
+                "variant": variant.name,
+                "_body_manifest": args["body_manifest"] or None,
+                "_outfit_manifest": args["outfit_manifest"] or None,
+            }
+        )
+        if args["allow_fallback_glb"]:
+            raise ValueError(
+                "--allow-fallback-glb was removed on purpose: a build must never publish a "
+                "placeholder GLB. Fix the export instead."
             )
-        elif args["allow_fallback_glb"]:
-            # Explicit opt-in only: a placeholder must never pass for a build.
-            try:
-                _minimal_glb(str(glb_path))
-                result["metrics"].update(
-                    {
-                        "glb_path": str(glb_path),
-                        "glb_file_size_bytes": os.path.getsize(glb_path),
-                        "glb_is_fallback": True,
-                    }
-                )
-            except Exception as exc:
-                result["metrics"]["glb_fallback_error"] = f"{exc.__class__.__name__}: {exc}"
-        else:
-            result["metrics"]["glb_path"] = None
-            result["metrics"]["glb_is_fallback"] = False
 
-        result["metrics"].setdefault("duration_seconds", round(time.time() - started, 3))
+        result.update({"outfit": outfit, "variant": variant.name, "region": region})
+        result["inputs"] = {
+            "blend": blend,
+            "variant": variant.name,
+            "variant_file": variant.path,
+            "outfit": outfit,
+            "region": region,
+        }
+        outcome = _run(stage, blend, region, params)
+        result.update(
+            {
+                "status": outcome.get("status", "fail"),
+                "stage": outcome.get("stage", stage),
+                "metrics": outcome.get("metrics", {}),
+                "checkpoint": outcome.get("checkpoint"),
+                "error": outcome.get("error") or outcome.get("metrics", {}).get("error"),
+                "outfit": outcome.get("outfit", outfit),
+                "variant": outcome.get("variant", variant.name),
+            }
+        )
+        if outcome.get("stages"):
+            result["stages"] = outcome["stages"]
+        if outcome.get("artifacts"):
+            result["artifacts"] = outcome["artifacts"]
+    except Exception as exc:  # configuration/usage error: report, never trace-crash
+        result["error"] = f"{exc.__class__.__name__}: {exc}"
+        result["metrics"] = {"error": result["error"]}
+        if not isinstance(exc, (ValueError, RuntimeError)):
+            result["metrics"]["traceback"] = traceback.format_exc()
 
-    # Write result JSON (always, even on failure) so CI can print the reason.
+    result["metrics"].setdefault("duration_seconds", round(time.time() - started, 3))
     out_dir = os.path.dirname(os.path.abspath(out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    with open(out, "w") as f:
-        json.dump(result, f, indent=2)
+    with open(out, "w") as fh:
+        json.dump(result, fh, indent=2, default=str)
 
     if result["status"] == "pass":
-        print(f"[run_pipeline] {stage}: PASS")
+        print(f"[run_pipeline] {result['stage']}: PASS ({result['variant']}/{result['outfit']})")
+        artifacts = result.get("artifacts") or {}
+        for name, path in artifacts.items():
+            print(f"[run_pipeline]   {name}: {path}")
+        print(f"[run_pipeline]   result: {out}")
         return 0
 
-    print(f"[run_pipeline] {stage}: FAIL — {result.get('error')}", file=sys.stderr)
-    print(json.dumps(result.get("metrics", {}), indent=2)[:4000], file=sys.stderr)
+    print(f"[run_pipeline] {result['stage']}: FAIL — {result.get('error')}", file=sys.stderr)
+    print(json.dumps(result.get("metrics", {}), indent=2, default=str)[:6000], file=sys.stderr)
     return 1
 
 
@@ -333,6 +233,6 @@ if __name__ == "__main__":
         sys.exit(main())
     except SystemExit:
         raise
-    except Exception:  # last-resort guard so Blender never exits 0 on a crash
+    except Exception:  # last-resort guard: Blender must never exit 0 on a crash
         traceback.print_exc()
         sys.exit(1)

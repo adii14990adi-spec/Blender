@@ -1,27 +1,27 @@
-"""Mocked full-pipeline test: stage N+1 must open stage N's checkpoint.
+"""Checkpoint chaining contract (mocked stages, no Blender required).
 
-This is the acceptance check for the second CI bug: the export stage ran
-against the raw ``BASE_BODY.blend``, which never contains a ``CLOTH_Shell``
-object because only the shell stage creates it. Mocked stages keep this test
-Blender-free.
+The original CI bug: the export stage ran against the raw base-body blend,
+which never contains a ``CLOTH_Shell`` object because only the shell stage
+creates it. These tests pin the rule that stage *N+1* always receives stage
+*N*'s checkpoint, and that a stage claiming "pass" without a real file on disk
+is treated as a failure instead of a fresh output.
 """
 
 from __future__ import annotations
 
 import json
 import types
-from pathlib import Path
 
 import pytest
 import run_pipeline
 
 from bpy_scripts import pipeline
 
-BASE_BLEND = "assets/base_body/BASE_BODY.blend"
+BASE_BLEND = "/tmp/base_body_Male.blend"
 OUTFIT = "jacket_urban_01"
 
 
-def _fake_stage(name: str, index: int, calls: list[tuple[str, str]], status: str = "pass"):
+def _fake_stage(name: str, index: int, calls: list, tmp_path, status: str = "pass"):
     def run(blend_path, region="UPPER_BODY", params=None, outfit=None):
         calls.append((name, blend_path))
         if status != "pass":
@@ -31,22 +31,25 @@ def _fake_stage(name: str, index: int, calls: list[tuple[str, str]], status: str
                 "metrics": {"error": f"{name} failed on purpose"},
                 "checkpoint": None,
             }
+        path = tmp_path / f"{index:02d}_{name}.blend"
+        path.write_bytes(b"BLENDER" + b"\x00" * 4096)
         return {
             "status": "pass",
             "stage": name,
             "metrics": {},
-            "checkpoint": f"/tmp/{outfit}/{index:02d}_{name}.blend",
+            "checkpoint": str(path),
         }
 
     return types.SimpleNamespace(run=run)
 
 
-def _patch(monkeypatch, calls, tmp_path: Path, failing: str | None = None):
+def _patch(monkeypatch, calls, tmp_path, failing: str | None = None):
     registry = {
         name: _fake_stage(
             name,
             index,
             calls,
+            tmp_path,
             status="fail" if name == failing else "pass",
         )
         for index, name in enumerate(pipeline.STAGE_ORDER)
@@ -55,32 +58,33 @@ def _patch(monkeypatch, calls, tmp_path: Path, failing: str | None = None):
     monkeypatch.setattr(
         pipeline,
         "validation_report_path",
-        lambda outfit: str(tmp_path / outfit / "validation_report.json"),
+        lambda outfit, variant=None: str(
+            tmp_path / (variant or "unknown") / outfit / "report.json"
+        ),
     )
+    monkeypatch.setattr(pipeline, "outfit_dir", lambda outfit, variant=None: str(tmp_path))
 
 
 @pytest.mark.unit
 def test_full_pipeline_passes_each_checkpoint_to_the_next_stage(monkeypatch, tmp_path) -> None:
-    calls: list[tuple[str, str]] = []
+    calls: list = []
     _patch(monkeypatch, calls, tmp_path)
 
     result = pipeline.run_full_pipeline(BASE_BLEND, "UPPER_BODY", {"outfit": OUTFIT})
 
-    assert result["status"] == "pass"
+    assert result["status"] == "pass", result
     assert result["outfit"] == OUTFIT
+    assert [name for name, _ in calls] == list(pipeline.STAGE_ORDER)
 
-    expected = [BASE_BLEND]
-    expected += [
-        f"/tmp/{OUTFIT}/{index:02d}_{name}.blend"
-        for index, name in enumerate(pipeline.STAGE_ORDER[:-1])
+    expected = [BASE_BLEND] + [
+        str(tmp_path / f"{i:02d}_{name}.blend") for i, name in enumerate(pipeline.STAGE_ORDER[:-1])
     ]
     assert [path for _, path in calls] == expected
-    assert [name for name, _ in calls] == list(pipeline.STAGE_ORDER)
 
 
 @pytest.mark.unit
 def test_full_pipeline_stops_at_the_first_failure(monkeypatch, tmp_path) -> None:
-    calls: list[tuple[str, str]] = []
+    calls: list = []
     _patch(monkeypatch, calls, tmp_path, failing="weights")
 
     result = pipeline.run_full_pipeline(BASE_BLEND, "UPPER_BODY", {"outfit": OUTFIT})
@@ -88,6 +92,42 @@ def test_full_pipeline_stops_at_the_first_failure(monkeypatch, tmp_path) -> None
     assert result["status"] == "fail"
     assert result["stage"] == "weights"
     assert [name for name, _ in calls] == ["shell", "shrinkwrap", "weights"]
+    assert result["artifacts"] == {}
+
+
+@pytest.mark.unit
+def test_a_stage_that_reports_pass_without_a_file_is_a_failure(monkeypatch, tmp_path) -> None:
+    """Stale/absent checkpoints must never be chained downstream."""
+    calls: list = []
+    registry = {
+        name: _fake_stage(name, i, calls, tmp_path) for i, name in enumerate(pipeline.STAGE_ORDER)
+    }
+    broken = registry["shell"]
+
+    def ghost_run(blend_path, region="UPPER_BODY", params=None, outfit=None):
+        calls.append(("shell", blend_path))
+        return {
+            "status": "pass",
+            "stage": "shell",
+            "metrics": {},
+            "checkpoint": str(tmp_path / "does_not_exist.blend"),
+        }
+
+    registry["shell"] = types.SimpleNamespace(run=ghost_run)
+    monkeypatch.setattr(pipeline, "STAGE_REGISTRY", registry)
+    monkeypatch.setattr(
+        pipeline,
+        "validation_report_path",
+        lambda outfit, variant=None: str(tmp_path / "report.json"),
+    )
+    monkeypatch.setattr(pipeline, "outfit_dir", lambda outfit, variant=None: str(tmp_path))
+    assert broken  # keep the reference alive / documents intent
+
+    result = pipeline.run_full_pipeline(BASE_BLEND, "UPPER_BODY", {"outfit": OUTFIT})
+
+    assert result["status"] == "fail"
+    assert "checkpoint on disk" in result["error"]
+    assert [name for name, _ in calls] == ["shell"]
 
 
 @pytest.mark.unit
@@ -95,20 +135,21 @@ def test_full_pipeline_stops_at_the_first_failure(monkeypatch, tmp_path) -> None
 def test_cli_routes_full_run_aliases_to_run_full_pipeline(
     monkeypatch, tmp_path, stage_flag: str
 ) -> None:
-    blend = tmp_path / "BASE_BODY.blend"
+    blend = tmp_path / "base_body_Male.blend"
     blend.write_bytes(b"BLENDER-v300" + b"\x00" * 64)
     out = tmp_path / "result.json"
 
-    seen: dict[str, str] = {}
+    seen: dict = {}
 
     def fake_full(blend_path, region="UPPER_BODY", params=None):
         seen["blend"] = blend_path
         return {
             "status": "pass",
-            "stage": "full",
+            "stage": "export",
             "metrics": {"staged": "full"},
             "checkpoint": None,
             "outfit": OUTFIT,
+            "stages": [],
         }
 
     monkeypatch.setattr(pipeline, "run_full_pipeline", fake_full)

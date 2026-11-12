@@ -1,25 +1,25 @@
-"""Weights validator: max 4 weights/vertex (mobile ceiling) + group coverage."""
+"""Weights validator: deform-only weights, <= limit influences, normalised, bound."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-try:
-    import bmesh
+try:  # pragma: no cover
     import bpy
 
     _HAS_BPY = True
-except ImportError:  # pragma: no cover - allows import / lint outside Blender
-    bmesh = None  # type: ignore[assignment]
+except ImportError:  # pragma: no cover
     bpy = None  # type: ignore[assignment]
     _HAS_BPY = False
 
+from ..stages.weights import HELPER_GROUPS, verify_weights
 from ..utils.logging import get_logger
+from ..utils.rig import deform_bone_names
 
 logger = get_logger("validators.weights_check")
 
-SHELL_OBJECT_NAME = "CLOTH_Shell"
-MAX_WEIGHTS = 4  # CHANGELOG v1.3.0 mobile ceiling
+GARMENT_OBJECT_NAME = "CLOTH_Shell"
+MAX_WEIGHTS = 4
 
 
 def run(
@@ -27,46 +27,48 @@ def run(
     region: str = "UPPER_BODY",
     params: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    params = params or {}
     if not _HAS_BPY:
-        return {
-            "status": "fail",
-            "metrics": {"error": "bpy not available outside Blender"},
-        }
-
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
-
-    shell = bpy.data.objects.get(SHELL_OBJECT_NAME)
-    if shell is None or shell.type != "MESH":
-        return {
-            "status": "fail",
-            "metrics": {"error": "CLOTH_Shell mesh not found"},
-        }
-
-    bm = bmesh.new()
+        return {"status": "fail", "metrics": {"error": "bpy is not available: run inside Blender"}}
     try:
-        bm.from_mesh(shell.data)
-        deform_layer = bm.verts.layers.deform.active
-        max_weights = 0
-        verts_exceeding = 0
-        if deform_layer is not None:
-            for vert in bm.verts:
-                n = len(vert[deform_layer])
-                max_weights = max(max_weights, n)
-                if n > MAX_WEIGHTS:
-                    verts_exceeding += 1
-        else:
-            max_weights = 0
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception as exc:
+        return {"status": "fail", "metrics": {"error": f"could not open {blend_path}: {exc}"}}
 
-        passed = max_weights <= MAX_WEIGHTS and verts_exceeding == 0
-        return {
-            "status": "pass" if passed else "fail",
-            "metrics": {
-                "max_weights_per_vertex": max_weights,
-                "weight_limit": MAX_WEIGHTS,
-                "verts_exceeding_limit": verts_exceeding,
-                "vertex_groups": [g.name for g in shell.vertex_groups],
-            },
-        }
-    finally:
-        bm.free()
+    garment = bpy.data.objects.get(params.get("garment_object", GARMENT_OBJECT_NAME))
+    if garment is None or garment.type != "MESH":
+        return {"status": "fail", "metrics": {"error": f"{GARMENT_OBJECT_NAME} mesh not found"}}
+
+    armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+    if not armatures:
+        return {"status": "fail", "metrics": {"error": "no armature in the scene"}}
+    armature = armatures[0]
+    bones = deform_bone_names(armature)
+    limit = int(params.get("weight_limit", MAX_WEIGHTS))
+    verification = verify_weights(garment, bones, limit)
+
+    modifiers = [m for m in garment.modifiers if m.type == "ARMATURE" and m.object == armature]
+    metrics = {
+        "armature": armature.name,
+        "deform_bones": len(bones),
+        "weight_limit": limit,
+        "bound": bool(modifiers),
+        "vertex_groups": [group.name for group in garment.vertex_groups],
+        "helper_groups": sorted(HELPER_GROUPS & {group.name for group in garment.vertex_groups}),
+        "verification": verification,
+    }
+    problems = []
+    if not modifiers:
+        problems.append("garment has no Armature modifier bound to the character armature")
+    if verification["unweighted_vertices"]:
+        problems.append(f"{verification['unweighted_vertices']} unweighted vertices")
+    if verification["unnormalised_vertices"]:
+        problems.append(f"{verification['unnormalised_vertices']} vertices are not normalised")
+    if verification["vertices_exceeding_limit"]:
+        problems.append(
+            f"{verification['vertices_exceeding_limit']} vertices exceed {limit} influences"
+        )
+    if verification["helper_groups_colliding_with_bones"]:
+        problems.append("a helper group collides with a deform bone name")
+    metrics["problems"] = problems
+    return {"status": "fail" if problems else "pass", "metrics": metrics}

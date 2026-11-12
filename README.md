@@ -1,125 +1,151 @@
 # Modular Clothing Pipeline
 
-Production-grade headless Blender pipeline for generating modular clothing (shell → shrinkwrap → weights → UV/material → FBX export), orchestrated by Arena Agent and gated by GitHub Actions CI.
+Headless Blender 5.0 pipeline that turns a humanoid base body into a game-ready
+garment asset:
+
+```
+shell → shrinkwrap → weights → uv_material → export
+  │         │           │            │           └─ FBX + GLB (native exporters, validated)
+  │         │           │            └─ smart UV unwrap + PBR maps (packed)
+  │         │           └─ armature binding, ≤ 4 influences/vertex, normalised
+  │         └─ nearest-surface fit + real thickness (watertight shell)
+  └─ garment panel cut from the body, opened at the front
+```
+
+Both body variants — `base_body_Male.blend` and `base_body_Female.blend` — are
+first-class. There is **no** `BASE_BODY.blend` assumption and no blockout-body
+path in production code.
+
+## Current status
+
+Latest full run (both variants, real Blender 5.0, Khronos-validated):
+see [`docs/BUILD_REPORT.md`](docs/BUILD_REPORT.md).
+
+| Check | male | female |
+| --- | --- | --- |
+| All 5 stages | PASS | PASS |
+| Garment (panel → final) | 3 318 → 6 930 faces | 3 482 → 7 302 faces |
+| Watertight / degenerate faces | yes / 0 | yes / 0 |
+| Min clearance / penetrations | 6.3 mm / 0 | 6.8 mm / 0 |
+| Max influences per vertex | 4 | 4 |
+| UV layers / coverage | 1 / 0.96 | 1 / 0.96 |
+| GLB GLB skin + joints | 1 / 21 | 1 / 21 |
+| Khronos errors / warnings | 0 / 0 | 0 / 0 |
+| FBX skin clusters | 21 | 21 |
+
+What the pipeline does *not* do is documented in
+[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — read it before promising a
+tailored coat.
 
 ## Repository layout
 
 ```
-.github/            # CI workflows + issue templates
-prompts/            # Versioned master prompt + stage sub-prompts (source of truth)
-blender/            # bpy pipeline stages, validators, utils, entry point
-assets/             # Base body, reference sheets, textures (Git LFS)
-outputs/            # CI artifacts — gitignored
-agent/              # Arena Agent config, tool schemas, system prompt
-tests/              # Unit + integration tests (run inside Blender)
-docker/             # Blender 5.x headless image
+.github/workflows/     ci.yml (PR gate + matrix build) · blender-build.yml (deploy)
+.github/actions/       setup-blender composite action (Blender 5.0 + checksum)
+blender/               pipeline package (bpy_scripts), entry point, stages, validators
+  bpy_scripts/stages/  shell · shrinkwrap · weights · uv_material · export_fbx
+  bpy_scripts/utils/   geometry, rig, textures, checkpoints, paths, glb/fbx inspectors
+  bpy_scripts/validators/  preflight, weights, topology, uv, export
+assets/base_body/      base_body_Male.blend, base_body_Female.blend, manifest.json
+assets/outfits/        outfits.json (region, coverage, offsets, thickness, materials)
+assets/textures/       per-outfit PBR slots (generated set is gitignored)
+tests/unit/            pure-Python tests (no Blender)
+tests/integration/     real pipeline runs inside Blender 5.0
+tools/                 run_headless.py, validate_exports.py, build_report.py, gltf_validate.js
+web_viewer/            model-viewer review page (male/female switch)
+docs/                  pipeline reference, limitations, build report
 ```
 
 ## Quick start
 
 ```bash
-# Lint
-make lint
+# 0) Blender 5.0 - either the binary on PATH, or the importable module
+pip install bpy==5.0.0            # Python 3.11, used by the integration tests
 
-# Run the PR-gate validation stage (requires headless Blender on PATH)
-make validate
+# 1) what can I build?
+python tools/run_headless.py --list-assets
 
-# Run unit tests inside Blender
-make test
+# 2) full build for one variant
+python tools/run_headless.py --variant male --outfit jacket_urban_01 --stage full --out /tmp/build.json
 
-# Full pipeline + FBX/GLB export (stage chaining, see below)
-make build OUTFIT=jacket_urban_01          # = --stage full
+#    ...or with the real Blender binary (what CI uses)
+blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+  --stage full --variant female --out /tmp/build_female.json
 
-# Lint + non-Blender tests (import wiring, CLI contract)
-ruff check blender tests agent
-pytest -q
+# 3) validate the artifacts (structure + Khronos validator)
+python tools/validate_exports.py --outfit jacket_urban_01 --variant male --khronos
+
+# 4) build report
+python tools/build_report.py --run male=/tmp/build.json --out docs/BUILD_REPORT.md
+
+# 5) tests
+pytest tests/unit -q          # no Blender needed
+pytest tests -q               # includes the real pipeline (needs bpy)
 ```
 
-`run_pipeline.py` exits **0 only when the requested stage passes**. On failure it
-writes the failure JSON to `--out` and exits **1**, so CI goes red at the step
-that actually broke. Blender also needs `--python-exit-code 1` so an uncaught
-Python error fails the step instead of exiting 0.
+Outputs land in `outputs/<variant>/<outfit>/`:
 
-A placeholder GLB is only written when `--allow-fallback-glb` is passed, and it
-is always flagged with `glb_is_fallback: true`; the build workflow asserts that
-flag is not set.
+```
+00_garment.blend   01_fitted.blend   02_skinned.blend   03_material.blend   04_final.blend
+run_index.json     validation_report.json     export_report.json
+jacket_urban_01_Modular.fbx               jacket_urban_01_Modular.glb
+```
+
+Male and female build into **separate directories** — the previous pipeline let
+the second variant overwrite the first one's exports.
 
 ## How the stages chain
 
-Each stage opens the newest checkpoint written before it
-(`outputs/<outfit>/00_shell.blend` → `01_shrinkwrapped.blend` →
-`02_weighted.blend` → `03_uv_material.blend`) and saves its own checkpoint, so a
-failed run is resumable and `--stage shrinkwrap` re-uses stage 1's output. Metrics
-record `input.input_source` (`checkpoint` or `base_blend`) and
-`input_blend` (the exact file the stage was handed) so the run log shows which
-artifact was consumed. `--stage full` (alias `--stage all`) runs the whole chain
-and stops at the first failure.
+Each stage opens the upstream checkpoint and writes its own. The orchestrator
+records every checkpoint in `run_index.json` (path, size, mtime, signature), and
+a checkpoint only counts as fresh if the file still matches. Running a stage
+invalidates everything downstream, and `--stage full` clears the index first, so
+a stale `.blend` can never be exported as if it were new.
+
+`--stage shrinkwrap` on a clean tree resolves the body from the manifest and
+fails with "run the `shell` stage first" instead of pretending it worked.
+
+See [`docs/PIPELINE.md`](docs/PIPELINE.md) for the exact gates of every stage.
+
+## Exit codes and failure reporting
+
+`blender/run_pipeline.py` exits **0 only when every requested stage passed and
+the exports validated**. On failure it writes the JSON report to `--out` and
+exits 1, so CI goes red at the step that broke. Blender additionally runs with
+`--python-exit-code 1` so an uncaught Python error cannot exit 0.
+
+There is no placeholder/fallback GLB any more: `--allow-fallback-glb` is
+rejected explicitly. A build that cannot produce a valid asset fails.
 
 ## CI
 
-| Workflow | Trigger | Purpose |
-|---|---|---|
-| `.github/workflows/blender-validate.yml` | `pull_request` | PR gate — runs validators only, blocks bad exports (skipped with a warning while the base body is still a placeholder) |
-| `.github/workflows/blender-build.yml` | `push` to `main` | Full pipeline + FBX/GLB export, uploads `outputs/` artifact and deploys the web viewer to Pages |
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | PR, push to `main`, manual | `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
+| `blender-build.yml` | push to `main`, manual | Builds both variants, validates every FBX/GLB, generates `BUILD_REPORT.md`, and deploys **only validated export artifacts** to GitHub Pages |
 
-### GitHub Pages (one-time setup)
+The PR gate fails when a base body is missing or a Git-LFS pointer — it never
+skips itself green.
 
-Enable Pages in **Settings → Pages → Build and deployment → Source: GitHub Actions**. Once enabled, every successful `main` build publishes the browser review page at `https://adii14990adi-spec.github.io/Blender/`.
+### GitHub Pages
 
-Without Pages enabled, the deploy step will fail at `deploy-pages` (no publish target).
+Enable **Settings → Pages → Source: GitHub Actions**. The review page
+(`web_viewer/index.html`) lets you switch between the male and female builds and
+shows the stage status from the build's `validation_report.json`.
 
-## Known placeholders
+## Troubleshooting
 
-Two files are intentionally stubs and must be replaced before the build can go
-green:
-
-| Path | State | Needed |
-|---|---|---|
-| `assets/base_body/BASE_BODY.blend` | 385-byte text stub | A real Blender file with a `BASE_BODY` mesh and `UPPER_BODY`/`LOWER_BODY`/`HEAD` vertex groups, committed with Git LFS |
-| `assets/base_body/BASE_BODY.fbx` | stub | The same body exported from Unity, for scale checks |
-
-`run_pipeline.py` detects the stub by its file header and fails with an
-actionable message instead of letting Blender fail obscurely. For an explicitly
-allowed smoke test without a real asset, pass
-`--params '{"allow_blockout_body": true}'`: the shell stage then builds a blockout
-cube and records `base_body_source: "blockout"`.
-
-The FBX/GLB exporters no longer write placeholder files on failure — a failed
-export fails the stage. Previously a stub FBX and a cube GLB were produced with
-`status: pass`, which is how the CI run looked green while shipping nothing.
-
-## Prompt versioning
-
-`prompts/master_prompt.md` is the authoritative system instruction for Arena Agent. Every change goes through `prompts/CHANGELOG.md` (semver) and a validation run. The agent pins the version in `agent/arena_agent_config.yaml`.
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `… is not a Blender file (starts with b'version https://git-lfs…')` | Git LFS pointer instead of the asset | `git lfs install && git lfs pull` |
+| `'CLOTH_Shell' not found in base_body_Male.blend` | ran a downstream stage without its upstream checkpoint | run `--stage full`, or `--stage shell` first |
+| `min_clearance -0.000x` / penetrations > 0 after the fit | offset too small for the anatomy | raise `offset.default` in `assets/outfits/outfits.json` |
+| `edge distortion 4.03 exceeds 3.00` | fit dragged fabric over a concave region | raise `relax_iterations`, or reduce `hem_extra`/`sleeve_extra` |
+| `base colour texture is blank` | generated PNG never got its pixels | regenerate `assets/textures/<outfit>/` (delete and rebuild) |
+| `Khronos: ACCESSOR_VECTOR3_NON_UNIT … TANGENT` | zero-length tangent on a UV-degenerate sliver | handled automatically; > 1 % means the UV layout is broken |
 
 ## Asset storage
 
-`*.blend`, `*.fbx`, `*.png` are tracked with Git LFS (`.gitattributes`). `outputs/` is CI-only and never committed. Reference sheets >50 MB should live in S3 with an in-repo `reference_manifest.json`.
-
-## Docker
-
-Pin Blender 5.x:
-
-```bash
-docker build -t ghcr.io/<org>/blender5-headless:5.0.0 -f docker/Dockerfile.blender .
-```
-
-Never use `:latest` in production workflows — bpy API drift will silently break the pipeline.
-
-## Blender 5.0 headless risk audit
-
-| # | Risk | State here |
-|---|---|---|
-| R1 | `except Exception: pass` around `bpy.ops.wm.open_mainfile` hides a missing/corrupt file | Fixed — every stage fails with `could not open <path>: <error>` |
-| R2 | A failed `bpy.ops.export_scene.fbx` wrote a fake 12-byte FBX and still returned `pass` | Fixed — a failed FBX/GLB export fails the stage; no stub files are written |
-| R3 | Git LFS pointer instead of a real `.blend` | Detected in `run_pipeline.py` (magic header check) and printed by the "Inspect base body asset" CI step |
-| R4 | Operators needing a UI context / active object | Export stage links the shell into the active view layer, falls back to direct deselection, and `mode_set` is never required; only `blender -b` is used, no window ops |
-| R5 | Object names (`CLOTH_Shell`, `BASE_BODY`) assumed after load | Export stage logs `[o.name for o in bpy.data.objects]` and returns the list in failure metrics; shell stage fails if `BASE_BODY` is absent (blockout is opt-in) |
-| R6 | Relative `outputs/` vs `REPO_ROOT/outputs` | Fixed — every path goes through `bpy_scripts/utils/paths.py`; `run_pipeline.py` checks the GLB under `REPO_ROOT/outputs/<outfit>/` |
-| R7 | A fallback GLB reaching GitHub Pages | Fixed — fallback requires `--allow-fallback-glb` and is flagged; the build asserts `glb_is_fallback` is false and size > 1 KB before Pages setup |
-| R8 | Node 20 deprecation on `actions/checkout@v4` | Cosmetic, no action needed |
-
-Everything bpy-specific above is guarded and lint-checked, but it is **not
-executed in this repo's test suite** — the pipeline code paths only run inside
-real Blender (CI). `pytest` covers the import wiring, CLI exit codes and stage
-chaining with mocked stages.
+`*.blend`, `*.fbx` and `*.png` are tracked with Git LFS (`.gitattributes`).
+`outputs/`, `site/` and the generated texture sets are build products and stay
+out of version control.

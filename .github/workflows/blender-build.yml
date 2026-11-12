@@ -1,101 +1,178 @@
-name: Blender Build
+name: Build & Deploy Assets
 
-# On merge to main: full pipeline + export + deploy web viewer to GitHub Pages.
+# Production build: runs the real Blender 5.0 pipeline for both body variants,
+# validates every exported FBX/GLB (project inspectors + Khronos glTF
+# Validator), writes a build report and only then deploys the *validated*
+# assets to GitHub Pages. A failed or incomplete build publishes nothing.
+
 on:
   push:
     branches: [main]
-    paths: ["blender/**", "prompts/**", "assets/**"]
+    paths:
+      - "blender/**"
+      - "assets/**"
+      - "tools/**"
+      - "web_viewer/**"
+      - ".github/workflows/blender-build.yml"
+      - ".github/actions/**"
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  build-and-deploy:
+  build:
+    name: Build ${{ matrix.variant }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: male
+            outfit: jacket_urban_01
+          - variant: female
+            outfit: jacket_urban_01
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: ./.github/actions/setup-blender
+
+      - name: Install Khronos glTF Validator
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify base body for ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          BODY=$(python -c "import sys;sys.path.insert(0,'blender');from bpy_scripts import config;print(config.resolve_variant('${{ matrix.variant }}').path)")
+          echo "base body: ${BODY}"
+          head -c 7 "${BODY}" | grep -q BLENDER || { echo "::error::${BODY} is not a Blender file"; exit 1; }
+
+      - name: Run pipeline (${{ matrix.variant }})
+        run: |
+          set -euo pipefail
+          blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+            --stage full \
+            --variant ${{ matrix.variant }} \
+            --outfit ${{ matrix.outfit }} \
+            --out "/tmp/build_${{ matrix.variant }}.json"
+
+      - name: Show pipeline report
+        if: always()
+        run: cat "/tmp/build_${{ matrix.variant }}.json" 2>/dev/null || echo "(no build JSON)"
+
+      - name: Validate exports
+        run: |
+          set -euo pipefail
+          python tools/validate_exports.py \
+            --outfit ${{ matrix.outfit }} \
+            --variant ${{ matrix.variant }} \
+            --khronos \
+            --json "/tmp/exports_${{ matrix.variant }}.json"
+
+      - name: Upload validated assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.variant }}
+          # Only shippable artifacts (never the .blend checkpoints).
+          path: |
+            outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.fbx
+            outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.glb
+            outputs/${{ matrix.variant }}/${{ matrix.outfit }}/*.json
+          if-no-files-found: error
+
+  report:
+    name: Build report
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: assets-male
+          path: downloads/male
+      - uses: actions/download-artifact@v4
+        with:
+          name: assets-female
+          path: downloads/female
+
+      - name: Generate reports
+        run: |
+          set -euo pipefail
+          python tools/build_report.py \
+            --run "male=downloads/male/validation_report.json" \
+            --run "female=downloads/female/validation_report.json" \
+            --out reports/BUILD_REPORT.md \
+            --json reports/build_report.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: reports/
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy validated assets to Pages
+    needs: [build, report]
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          lfs: true
-
-      - name: Install headless Blender 5.0.0
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-              wget xvfb python3-pip libgl1 libxi6 libxrender1
-          wget -q https://download.blender.org/release/Blender5.0/blender-5.0.0-linux-x64.tar.xz
-          sudo tar -xf blender-5.0.0-linux-x64.tar.xz -C /opt
-          sudo ln -sf /opt/blender-5.0.0-linux-x64/blender /usr/local/bin/blender
-          rm -f blender-5.0.0-linux-x64.tar.xz
-          blender --version
-
-      # Git LFS pointers look like 130-byte text files; a real .blend starts
-      # with the "BLENDER" magic. Print both so LFS/asset problems are obvious.
-      - name: Inspect base body asset
-        run: |
-          ls -la assets/base_body/
-          head -c 64 assets/base_body/BASE_BODY.blend | od -c | head -4
-
-      - name: Run full pipeline and export FBX/GLB
-        run: |
-          # --python-exit-code 1 makes Blender fail the step on an uncaught
-          # Python error instead of exiting 0.
-          blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
-            --stage full \
-            --blend assets/base_body/BASE_BODY.blend \
-            --region UPPER_BODY \
-            --params '{"outfit": "jacket_urban_01"}' \
-            --out /tmp/build.json
-
-      # The blender step now exits non-zero on failure, so the assert below may
-      # never run — dump the failure JSON so the reason is visible in the log.
-      - name: Show build result on failure
-        if: failure()
-        run: |
-          echo "--- /tmp/build.json ---"
-          cat /tmp/build.json 2>/dev/null || echo "(no build.json written)"
-          echo "--- outputs/ ---"
-          ls -laR outputs 2>/dev/null || true
-
-      - name: Assert build produced outputs
-        run: |
-          python -c "
-          import json, os
-          r = json.load(open('/tmp/build.json'))
-          m = r['metrics']
-          assert r['status'] == 'pass', r
-          assert not m.get('glb_is_fallback'), f'fallback GLB produced: {m}'
-          glb = m.get('glb_path') or ''
-          assert glb and os.path.exists(glb), f'glb missing: {glb}'
-          assert m.get('glb_file_size_bytes', 0) > 1024, f'glb suspiciously small: {m}'
-          assert r.get('checkpoint'), 'no final checkpoint produced'
-          print('BUILD PASS:', m)
-          " || { echo "BUILD FAILED"; cat /tmp/build.json; exit 1; }
-
-      - uses: actions/upload-artifact@v4
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
         with:
-          name: clothing-build
-          path: outputs/
-
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v4
-
-      - name: Prepare docs folder
-        run: |
-          rm -rf docs
-          mkdir -p docs/outputs/jacket_urban_01
-          cp web_viewer/index.html docs/index.html
-          cp outputs/jacket_urban_01/*.glb docs/outputs/jacket_urban_01/
-          find docs -type f
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+          name: assets-male
+          path: site/outputs/male/jacket_urban_01
+      - uses: actions/download-artifact@v4
         with:
-          path: docs
+          name: assets-female
+          path: site/outputs/female/jacket_urban_01
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-reports
+          path: site/reports
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v3
+      - name: Re-validate what is about to be published
+        run: |
+          set -euo pipefail
+          for variant in male female; do
+            echo "== re-validating ${variant} =="
+            python tools/validate_exports.py \
+              "site/outputs/${variant}/jacket_urban_01/jacket_urban_01_Modular.glb" \
+              "site/outputs/${variant}/jacket_urban_01/jacket_urban_01_Modular.fbx" \
+              --require-skin
+          done
+
+      - name: Assemble Pages site
+        run: |
+          set -euo pipefail
+          cp web_viewer/index.html site/index.html
+          # Only export artifacts are published - never .blend checkpoints.
+          find site -name "*.blend*" -delete
+          find site -type f | sort
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

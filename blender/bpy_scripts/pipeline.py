@@ -1,8 +1,20 @@
 """Pipeline orchestrator.
 
-Dispatches a single stage to the matching bpy stage module or validator, and
-runs full validation (dry-run) for the ``validate`` stage. Every stage result is
-a JSON-serializable dict: ``{"status", "stage", "metrics", "checkpoint"}``.
+Stage graph
+-----------
+``shell -> shrinkwrap -> weights -> uv_material -> export``
+
+Every stage is executed **once**. The old ``STAGE_ORDER`` listed both ``uv`` and
+``material`` even though they pointed at the same module, so the unwrap and the
+material assignment ran twice (stacking a second UV layer and a second material).
+
+Aliases (``garment``, ``subdivide``, ``uv``, ``material``, ``export_fbx``) are
+resolved to their canonical stage *before* execution, so an alias can never add
+a second execution.
+
+Checkpoints are only chained when the run index proves they belong to the
+current variant/outfit/parameter set (:mod:`bpy_scripts.utils.checkpoints`), so a
+stale ``outputs/`` directory can never be mistaken for a fresh build.
 """
 
 from __future__ import annotations
@@ -10,38 +22,65 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 # Allow ``python blender/bpy_scripts/pipeline.py`` and
-# ``blender -b -P blender/run_pipeline.py`` (run_pipeline inserts blender/).
+# ``blender -b -P blender/run_pipeline.py`` (run_pipeline inserts ``blender/``).
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BLENDER_DIR = os.path.dirname(_HERE)
 if _BLENDER_DIR not in sys.path:
     sys.path.insert(0, _BLENDER_DIR)
 
-from bpy_scripts.stages import (  # noqa: E402 - path must be set before package import
+from bpy_scripts.config import ConfigError, load_outfit, resolve_variant  # noqa: E402
+from bpy_scripts.stages import (  # noqa: E402
     export_fbx,
     shell,
     shrinkwrap,
     uv_material,
     weights,
 )
-from bpy_scripts.utils.paths import latest_checkpoint, validation_report_path  # noqa: E402
+from bpy_scripts.utils.checkpoints import RunIndex, params_signature  # noqa: E402
+from bpy_scripts.utils.logging import get_logger  # noqa: E402
+from bpy_scripts.utils.paths import (  # noqa: E402
+    PIPELINE_VERSION,
+    ensure_dir,
+    outfit_dir,
+    validation_report_path,
+)
 from bpy_scripts.validators import (  # noqa: E402
+    export_check,
     preflight,
     topology_check,
     uv_check,
     weights_check,
 )
 
+logger = get_logger("pipeline")
+
+STAGE_ORDER: List[str] = ["shell", "shrinkwrap", "weights", "uv_material", "export"]
+
 STAGE_REGISTRY: Dict[str, Any] = {
     "shell": shell,
-    "subdivide": shell,
     "shrinkwrap": shrinkwrap,
     "weights": weights,
-    "uv": uv_material,
-    "material": uv_material,
+    "uv_material": uv_material,
     "export": export_fbx,
+}
+
+# Aliases resolve to a canonical stage; none of them adds an execution.
+STAGE_ALIASES: Dict[str, str] = {
+    "garment": "shell",
+    "generate_shell": "shell",
+    "subdivide": "shell",
+    "fit": "shrinkwrap",
+    "skin": "weights",
+    "skin_weights": "weights",
+    "uv": "uv_material",
+    "material": "uv_material",
+    "materials": "uv_material",
+    "export_fbx": "export",
+    "glb": "export",
+    "fbx": "export",
 }
 
 VALIDATOR_REGISTRY: Dict[str, Any] = {
@@ -49,21 +88,40 @@ VALIDATOR_REGISTRY: Dict[str, Any] = {
     "weights_check": weights_check,
     "topology_check": topology_check,
     "uv_check": uv_check,
+    "export_check": export_check,
 }
 
-# Canonical stage order — the agent may not skip a stage.
-STAGE_ORDER = ["shell", "shrinkwrap", "weights", "uv", "material", "export"]
+
+def canonical_stage(name: str) -> str | None:
+    """Resolve a stage name or alias to its canonical stage."""
+    if name in STAGE_REGISTRY:
+        return name
+    return STAGE_ALIASES.get(name)
+
+
+def stage_names() -> List[str]:
+    return list(STAGE_ORDER) + sorted(STAGE_ALIASES) + ["validate", "full", "all"]
 
 
 def _outfit_from_blend(blend_path: str) -> str:
     return os.path.splitext(os.path.basename(blend_path))[0]
 
 
-def _write_report(outfit: str, result: Dict[str, Any]) -> None:
-    report_path = validation_report_path(outfit)
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
-    with open(report_path, "w") as fh:
-        json.dump(result, fh, indent=2)
+def _write_report(outfit: str, result: Dict[str, Any], variant: str | None = None) -> None:
+    path = validation_report_path(outfit, variant)
+    ensure_dir(os.path.dirname(path))
+    with open(path, "w") as fh:
+        json.dump(result, fh, indent=2, default=str)
+
+
+def _context(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve variant + outfit once and pin them into the stage params."""
+    variant = resolve_variant(params.get("variant"), params.get("_body_manifest"))
+    outfit = str(params.get("outfit") or "")
+    if not outfit:
+        raise ConfigError("params['outfit'] is required (see assets/outfits/outfits.json)")
+    settings = load_outfit(outfit, params.get("_outfit_manifest"))
+    return {"variant": variant, "outfit": outfit, "settings": settings}
 
 
 def run_stage(
@@ -72,60 +130,159 @@ def run_stage(
     region: str = "UPPER_BODY",
     params: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Run one pipeline stage (or full validation) and return a result dict."""
-    params = params or {}
+    """Run one stage (or ``validate``) and return a JSON-serialisable result."""
+    params = dict(params or {})
     result: Dict[str, Any] = {
         "status": "fail",
         "stage": stage,
         "region": region,
         "metrics": {},
         "checkpoint": None,
+        "error": None,
     }
 
-    # --- validate stage: dry-run, no modification ---------------------------
     if stage == "validate":
-        return _run_validate(blend, region, params)
+        return run_validate(blend, region, params)
 
-    mod = STAGE_REGISTRY.get(stage)
-    if mod is None:
-        result["metrics"]["error"] = f"unknown stage: {stage}"
+    canonical = canonical_stage(stage)
+    if canonical is None:
+        result["error"] = f"unknown stage {stage!r}; expected one of {stage_names()}"
+        result["metrics"]["error"] = result["error"]
         return result
 
+    module = STAGE_REGISTRY[canonical]
     outfit = params.get("outfit") or _outfit_from_blend(blend)
+    params["outfit"] = outfit
+    params["stage"] = canonical
 
     try:
-        stage_result = mod.run(blend_path=blend, region=region, params=params, outfit=outfit)
-        result.update(stage_result)
+        context = _context(params)
+    except ConfigError as exc:
+        result["error"] = str(exc)
+        result["metrics"]["error"] = str(exc)
+        return result
+
+    if not blend:
+        # An empty blend path means "use the variant's base body from the manifest".
+        blend = context["variant"].path
+        result["input"] = {"input_source": "variant_manifest", "input_path": blend}
+
+    if region and region != context["settings"].get("region"):
+        logger.info(
+            "region %s overridden by outfit %s definition (%s)",
+            region,
+            outfit,
+            context["settings"].get("region"),
+        )
+        region = context["settings"].get("region", region)
+    params["variant"] = context["variant"].name
+    result["region"] = region
+    result["variant"] = context["variant"].name
+    result["outfit"] = outfit
+    result["canonical_stage"] = canonical
+
+    # Resolve the input: an explicit upstream checkpoint (full run) or the
+    # newest *fresh* checkpoint for this stage (standalone/resumed run).
+    signature = params_signature(context["variant"].name, outfit, params)
+    index = RunIndex(outfit, signature, context["variant"].name)
+    if params.get("_upstream"):
+        upstream = str(params["_upstream"])
+        input_info = {"input_source": "explicit", "input_path": upstream}
+    else:
+        upstream, input_info = index.upstream_input(canonical, STAGE_ORDER, blend)
+    params["_input_info"] = input_info
+    result["input"] = input_info
+
+    try:
+        stage_result = module.run(blend_path=upstream, region=region, params=params, outfit=outfit)
     except Exception as exc:  # stage boundary must never crash the orchestrator
-        result["metrics"]["error"] = f"{exc.__class__.__name__}: {exc}"
+        detail = f"{exc.__class__.__name__}: {exc}"
+        logger.exception("stage %s raised", canonical)
+        result["error"] = detail
+        result["metrics"]["error"] = detail
         return result
 
-    if result.get("status") != "pass":
-        return result
+    result.update(
+        {k: v for k, v in stage_result.items() if k in {"status", "metrics", "checkpoint", "error"}}
+    )
+    result.setdefault("metrics", {})
+    result["metrics"]["stage"] = canonical
+    result["metrics"]["pipeline_version"] = PIPELINE_VERSION
 
-    _write_report(outfit, result)
+    if result.get("status") == "pass":
+        checkpoint = result.get("checkpoint")
+        if checkpoint:
+            index.record(
+                canonical,
+                checkpoint,
+                {
+                    "variant": context["variant"].name,
+                    "params": {k: v for k, v in sorted(params.items()) if not k.startswith("_")},
+                },
+            )
+            # Everything downstream was derived from an older input.
+            index.invalidate_after(canonical, STAGE_ORDER)
+        _write_report(outfit, result, context["variant"].name)
+        logger.info("stage %s PASS (checkpoint=%s)", canonical, result.get("checkpoint"))
+    else:
+        logger.error(
+            "stage %s FAIL: %s", canonical, result.get("error") or result["metrics"].get("error")
+        )
     return result
 
 
-def _run_validate(blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Dry-run validation: open the newest artifact and run every validator."""
+def run_validate(blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Dry-run validation of the newest checkpoint (or the base blend)."""
     outfit = params.get("outfit") or _outfit_from_blend(blend)
-    checkpoint = latest_checkpoint(outfit)
+    try:
+        context = _context({**params, "outfit": outfit})
+    except ConfigError as exc:
+        return {
+            "outfit": outfit,
+            "stage": "validate",
+            "status": "fail",
+            "metrics": {"error": str(exc)},
+            "checkpoint": None,
+            "error": str(exc),
+        }
+
+    if not blend:
+        blend = context["variant"].path
+
+    signature = params_signature(context["variant"].name, outfit, params)
+    index = RunIndex(outfit, signature, context["variant"].name)
+    checkpoint = None
+    for stage in reversed(STAGE_ORDER[:-1]):
+        checkpoint = index.fresh_checkpoint(stage)
+        if checkpoint:
+            break
     target = checkpoint or blend
 
-    results = {}
+    results: Dict[str, Any] = {}
     overall = "pass"
-    for name, mod in VALIDATOR_REGISTRY.items():
+    for name, module in VALIDATOR_REGISTRY.items():
         try:
-            res = mod.run(blend_path=target, region=region, params=params)
-        except Exception as exc:  # validator boundary must never crash
+            res = module.run(
+                blend_path=target,
+                region=region,
+                params={**params, "outfit": outfit, "variant": context["variant"].name},
+            )
+        except Exception as exc:
             res = {"status": "fail", "metrics": {"error": f"{exc.__class__.__name__}: {exc}"}}
         results[name] = res
         if res.get("status") != "pass":
             overall = "fail"
 
+    failures = {
+        name: res.get("metrics", {}).get("error")
+        or res.get("metrics", {}).get("problems")
+        or "failed"
+        for name, res in results.items()
+        if res.get("status") != "pass"
+    }
     report = {
         "outfit": outfit,
+        "variant": context["variant"].name,
         "stage": "validate",
         "status": overall,
         "metrics": {
@@ -134,16 +291,9 @@ def _run_validate(blend: str, region: str, params: Dict[str, Any]) -> Dict[str, 
             "validated_source": "checkpoint" if checkpoint else "base_blend",
         },
         "checkpoint": checkpoint,
-        "error": (
-            "; ".join(
-                f"{name}: {res.get('metrics', {}).get('error', 'failed')}"
-                for name, res in results.items()
-                if res.get("status") != "pass"
-            )
-            or None
-        ),
+        "error": "; ".join(f"{name}: {detail}" for name, detail in failures.items()) or None,
     }
-    _write_report(outfit, report)
+    _write_report(outfit, report, context["variant"].name)
     return report
 
 
@@ -152,30 +302,80 @@ def run_full_pipeline(
     region: str = "UPPER_BODY",
     params: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Run all stages in order, chaining checkpoints; stop at the first failure.
-
-    Stage N+1 opens the checkpoint stage N saved (``last["checkpoint"]``), not
-    the base body again — otherwise shrinkwrap/weights/uv/export can never see
-    the ``CLOTH_Shell`` object created by stage 1.
-
-    ``params["outfit"]`` is pinned up front: without it a stage would derive the
-    outfit name from the checkpoint filename (``01_shrinkwrapped``) and write to
-    the wrong ``outputs/`` folder.
-    """
+    """Run every stage once, chaining fresh checkpoints and stopping on failure."""
     params = dict(params or {})
-    outfit = params.get("outfit") or _outfit_from_blend(blend)
-    params["outfit"] = outfit
+    try:
+        context = _context(params)
+    except ConfigError as exc:
+        return {
+            "status": "fail",
+            "stage": "pipeline",
+            "metrics": {"error": str(exc)},
+            "checkpoint": None,
+            "error": str(exc),
+            "outfit": params.get("outfit"),
+        }
 
-    current_blend = blend
-    last: Dict[str, Any] = {"status": "pass"}
+    outfit = context["outfit"]
+    params["outfit"] = outfit
+    params["variant"] = context["variant"].name
+    region = context["settings"].get("region", region)
+    if not blend:
+        blend = context["variant"].path
+    signature = params_signature(context["variant"].name, outfit, params)
+
+    index = RunIndex(outfit, signature, context["variant"].name)
+    index.clear()  # a full run always starts from the body, never from stale output
+    ensure_dir(outfit_dir(outfit, context["variant"].name))
+
+    current = blend
+    stages: List[Dict[str, Any]] = []
+    last: Dict[str, Any] = {"status": "pass", "metrics": {}, "checkpoint": None}
     for stage in STAGE_ORDER:
-        stage_result = run_stage(stage, current_blend, region, params)
+        stage_params = dict(params)
+        stage_params["_upstream"] = current
+        stage_result = run_stage(stage, current, region, stage_params)
         stage_result.setdefault("metrics", {})
-        if isinstance(stage_result["metrics"], dict):
-            stage_result["metrics"]["input_blend"] = current_blend
+        stage_result["metrics"]["input_blend"] = current
         stage_result["outfit"] = outfit
+        stages.append(
+            {
+                "stage": stage,
+                "status": stage_result.get("status"),
+                "checkpoint": stage_result.get("checkpoint"),
+                "error": stage_result.get("error"),
+                # Full per-stage metrics so the build report can be generated
+                # from the run JSON alone.
+                "metrics": stage_result.get("metrics", {}),
+            }
+        )
         last = stage_result
         if last.get("status") != "pass":
             break
-        current_blend = last.get("checkpoint") or current_blend
-    return last
+        checkpoint = last.get("checkpoint")
+        if not checkpoint or not os.path.exists(checkpoint):
+            last["status"] = "fail"
+            last["error"] = f"stage {stage} reported pass without a checkpoint on disk"
+            last["metrics"]["error"] = last["error"]
+            break
+        current = checkpoint
+        logger.info("chaining %s -> %s", stage, current)
+
+    summary = {
+        "outfit": outfit,
+        "variant": context["variant"].name,
+        "status": last.get("status", "fail"),
+        "stage": last.get("stage"),
+        "metrics": last.get("metrics", {}),
+        "checkpoint": last.get("checkpoint"),
+        "error": last.get("error") or last.get("metrics", {}).get("error"),
+        "stages": stages,
+        "pipeline_version": PIPELINE_VERSION,
+    }
+    summary["artifacts"] = last.get("metrics", {}).get("artifacts", {})
+    _write_report(outfit, summary, context["variant"].name)
+    return summary
+
+
+# Backwards-compatible private alias (older entry points imported it directly).
+_run_validate = run_validate

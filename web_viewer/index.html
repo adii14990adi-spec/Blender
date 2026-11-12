@@ -6,6 +6,7 @@
   <title>Modular Clothing Review</title>
   <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
   <style>
+    :root { color-scheme: dark; }
     body {
       margin: 0;
       background-color: #1e1e1e;
@@ -16,37 +17,27 @@
       width: 100vw;
       height: 100vh;
       background-color: #1e1e1e;
+      --poster-color: transparent;
     }
-    .controls {
+    .panel {
       position: absolute;
       top: 12px;
       left: 12px;
       z-index: 10;
       color: white;
-      background: rgba(0, 0, 0, 0.65);
+      background: rgba(0, 0, 0, 0.68);
       backdrop-filter: blur(6px);
       padding: 14px 18px;
       border-radius: 10px;
       border: 1px solid rgba(255, 255, 255, 0.15);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-      max-width: 260px;
+      width: 260px;
     }
-    .controls h3 {
-      margin: 0 0 6px 0;
-      font-size: 16px;
-      letter-spacing: 0.4px;
-    }
-    .controls p {
-      margin: 0 0 10px 0;
-      font-size: 13px;
-      color: #cfcfcf;
-    }
-    .controls .btn-group {
-      display: flex;
-      gap: 8px;
-    }
-    .controls button {
-      flex: 1;
+    .panel h3 { margin: 0 0 6px 0; font-size: 16px; letter-spacing: 0.4px; }
+    .panel p { margin: 0 0 10px 0; font-size: 13px; color: #cfcfcf; }
+    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn-group button {
+      flex: 1 1 auto;
       padding: 7px 10px;
       font-size: 12px;
       font-weight: 600;
@@ -56,61 +47,111 @@
       border-radius: 6px;
       cursor: pointer;
     }
-    .controls button:hover {
-      background: #e5e5e5;
+    .btn-group button:hover { background: #e5e5e5; }
+    .btn-group button[aria-pressed="true"] { background: #8ff0a3; }
+    .status { margin-top: 10px; font-size: 12px; color: #8fb0ff; min-height: 16px; }
+    .meta { margin-top: 8px; font-size: 11px; line-height: 1.5; color: #9a9a9a; white-space: pre-wrap; }
+    .badge {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: rgba(255, 138, 138, 0.2);
+      color: #ff8a8a;
     }
-    .controls button:active {
-      background: #d0d0d0;
-    }
-    .status {
-      margin-top: 10px;
-      font-size: 12px;
-      color: #8fb0ff;
-      min-height: 16px;
-    }
+    .badge.valid { background: rgba(143, 240, 163, 0.18); color: #8ff0a3; }
   </style>
 </head>
 <body>
-  <div class="controls">
+  <div class="panel">
     <h3>Asset Review</h3>
-    <p>Drag to Rotate &bull; Scroll to Zoom</p>
-    <div class="btn-group">
-      <button onclick="document.querySelector('model-viewer').play()">Play Animations</button>
-      <button onclick="document.querySelector('model-viewer').pause()">Pause</button>
+    <p>Drag to orbit &bull; scroll to zoom</p>
+    <div class="btn-group" id="variants">
+      <button data-variant="male" aria-pressed="true">Male</button>
+      <button data-variant="female" aria-pressed="false">Female</button>
     </div>
     <div class="status" id="status">Loading model&hellip;</div>
+    <div class="badge" id="badge" hidden></div>
+    <div class="meta" id="meta"></div>
   </div>
 
   <!--
-    Exported by the headless Blender pipeline at:
-    outputs/<outfit>/<outfit>_Modular.glb
-    Deployed to GitHub Pages under docs/ by blender-build.yml.
+    Assets are produced by the headless Blender pipeline:
+
+        outputs/<variant>/<outfit>/<outfit>_Modular.glb
+        outputs/<variant>/<outfit>/validation_report.json
+
+    blender-build.yml copies only *validated* builds into docs/outputs/ before
+    deploying to GitHub Pages, so a missing file here means the build failed
+    its validation gate - not that the viewer is broken.
   -->
   <model-viewer
     id="viewer"
-    src="./outputs/jacket_urban_01/jacket_urban_01_Modular.glb"
-    alt="Modular Jacket — Urban 01"
+    alt="Modular jacket"
     camera-controls
     autoplay
-    ar
     shadow-intensity="1"
     environment-image="neutral"
-    camera-orbit="0deg 75deg 2m"
-    reveal-when="interaction"
-  >
-  </model-viewer>
+    camera-orbit="0deg 78deg 2.4m"
+    field-of-view="26deg"
+    exposure="1.1"
+    reveal-when="auto"
+  ></model-viewer>
 
   <script>
-    const viewer = document.querySelector("model-viewer");
+    const OUTFIT = new URLSearchParams(location.search).get("outfit") || "jacket_urban_01";
+    const viewer = document.getElementById("viewer");
     const status = document.getElementById("status");
-    viewer.addEventListener("load", () => {
-      status.textContent = "Model loaded — ready for review";
-      status.style.color = "#8ff0a3";
-    });
+    const meta = document.getElementById("meta");
+    const badge = document.getElementById("badge");
+    const buttons = Array.from(document.querySelectorAll("#variants button"));
+
+    const assetUrl = (variant) => `./outputs/${variant}/${OUTFIT}/${OUTFIT}_Modular.glb`;
+    const reportUrl = (variant) => `./outputs/${variant}/${OUTFIT}/validation_report.json`;
+
+    function setStatus(text, colour) {
+      status.textContent = text;
+      status.style.color = colour;
+    }
+
+    async function describe(variant) {
+      meta.textContent = "";
+      badge.hidden = true;
+      try {
+        const response = await fetch(reportUrl(variant));
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const report = await response.json();
+        const stages = (report.stages || []).map((s) => `${s.stage}: ${s.status}`).join("\n");
+        meta.textContent = `${OUTFIT} · ${variant}\n${stages}`;
+        const ok = report.status === "pass";
+        badge.hidden = false;
+        badge.textContent = ok ? "validated build" : "UNVALIDATED build";
+        badge.classList.toggle("valid", ok);
+      } catch (error) {
+        // The report is optional in local previews; the GLB is what matters.
+        meta.textContent = `${OUTFIT} · ${variant}\n(no validation report next to this asset)`;
+      }
+    }
+
+    function load(variant) {
+      buttons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.variant === variant));
+      });
+      setStatus("Loading " + variant + " build\u2026");
+      viewer.src = assetUrl(variant);
+      viewer.setAttribute("alt", `${OUTFIT} (${variant})`);
+      describe(variant);
+    }
+
+    buttons.forEach((button) => button.addEventListener("click", () => load(button.dataset.variant)));
+    viewer.addEventListener("load", () => setStatus("Model loaded \u2014 ready for review", "#8ff0a3"));
     viewer.addEventListener("error", (event) => {
-      status.textContent = "Failed to load model: " + event.detail;
-      status.style.color = "#ff8a8a";
+      setStatus("Failed to load model: " + (event.detail?.message || "unknown error"), "#ff8a8a");
     });
+
+    load("male");
   </script>
 </body>
 </html>

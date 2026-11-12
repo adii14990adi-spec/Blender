@@ -1,0 +1,237 @@
+name: CI
+
+# Everything that must be true before a build may be published:
+#
+#   lint        ruff check + ruff format --check
+#   unit        pure-Python orchestration/manifest/exporter-inspector tests
+#   assets      both base bodies are real .blend files declared in the manifest
+#   pipeline    the real Blender 5.0 pipeline for male AND female, with
+#               FBX/GLB validation (project inspectors + Khronos validator)
+#   bpy-tests   the same pipeline driven by pytest inside the bpy runtime
+#   gate        fails if any of the above failed or was skipped
+#
+# A green gate means a real, validated asset was produced - never "the command
+# exited 0" and never "the test was skipped because the asset was missing".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint + format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip ruff
+      - run: ruff check blender tests tools
+      - run: ruff format --check blender tests tools
+
+  unit:
+    name: Unit tests (no Blender)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest numpy
+      - name: Run unit tests
+        run: python -m pytest tests/unit -m unit -q
+
+  assets:
+    name: Assets + manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Both base bodies must be real Blender files
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path(".")
+          manifest = json.loads((root / "assets/base_body/manifest.json").read_text())
+          variants = manifest["variants"]
+          problems = []
+          for name in ("male", "female"):
+              entry = variants.get(name)
+              if not entry:
+                  problems.append(f"{name}: missing from assets/base_body/manifest.json")
+                  continue
+              path = root / entry["file"]
+              if not path.exists():
+                  problems.append(f"{name}: {path} does not exist")
+                  continue
+              head = path.open("rb").read(16)
+              if not head.startswith(b"BLENDER"):
+                  problems.append(
+                      f"{name}: {path} is not a Blender file (starts with {head[:24]!r}); "
+                      "is it a Git LFS pointer?"
+                  )
+              if path.stat().st_size < 4096:
+                  problems.append(f"{name}: {path} is only {path.stat().st_size} bytes")
+
+          legacy = root / "assets/base_body/BASE_BODY.blend"
+          if legacy.exists():
+              print(f"::warning::legacy {legacy} still present; it is no longer used")
+
+          outfit_manifest = json.loads((root / "assets/outfits/outfits.json").read_text())
+          if "jacket_urban_01" not in outfit_manifest["outfits"]:
+              problems.append("outfit jacket_urban_01 missing from assets/outfits/outfits.json")
+
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
+          PY
+
+  pipeline:
+    name: Blender pipeline (${{ matrix.variant }})
+    needs: assets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [male, female]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: ./.github/actions/setup-blender
+
+      - name: Install Khronos glTF Validator
+        run: npm ci --no-audit --no-fund
+
+      - name: Build, validate and export
+        run: |
+          set -euo pipefail
+          blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+            --stage full \
+            --variant ${{ matrix.variant }} \
+            --outfit jacket_urban_01 \
+            --out "/tmp/build_${{ matrix.variant }}.json"
+
+      - name: Show pipeline report
+        if: always()
+        run: |
+          cat "/tmp/build_${{ matrix.variant }}.json" 2>/dev/null || echo "(no build JSON written)"
+
+      - name: Validate exports (inspectors + Khronos)
+        run: |
+          set -euo pipefail
+          python tools/validate_exports.py \
+            --outfit jacket_urban_01 \
+            --variant ${{ matrix.variant }} \
+            --khronos \
+            --json "/tmp/exports_${{ matrix.variant }}.json"
+
+      - name: Validate stage (dry-run validators on the final checkpoint)
+        run: |
+          set -euo pipefail
+          blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+            --stage validate \
+            --variant ${{ matrix.variant }} \
+            --outfit jacket_urban_01 \
+            --out "/tmp/validate_${{ matrix.variant }}.json"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clothing-${{ matrix.variant }}
+          path: |
+            outputs/${{ matrix.variant }}/jacket_urban_01/*.fbx
+            outputs/${{ matrix.variant }}/jacket_urban_01/*.glb
+            outputs/${{ matrix.variant }}/jacket_urban_01/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload run reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.variant }}
+          path: |
+            /tmp/build_${{ matrix.variant }}.json
+            /tmp/exports_${{ matrix.variant }}.json
+            /tmp/validate_${{ matrix.variant }}.json
+          if-no-files-found: warn
+
+  bpy-tests:
+    name: Integration tests (pytest + bpy)
+    needs: assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install bpy runtime + pytest
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libglx-mesa0 libxi6 libxrender1 libxxf86vm1 libxfixes3 \
+            libxkbcommon0 libsm6 libice6 libx11-6 libxext6
+          python -m pip install --upgrade pip
+          # bpy==5.0.0 is Blender 5.0 as an importable module (needs Python 3.11).
+          python -m pip install "bpy==5.0.0" pytest numpy
+      - name: Install Khronos glTF Validator
+        run: npm ci --no-audit --no-fund
+      - name: Show Blender version
+        run: python -c "import bpy; print('bpy', bpy.app.version_string)"
+      - name: Run unit + integration tests
+        run: python -m pytest tests -q
+
+  gate:
+    name: Build gate
+    needs: [lint, unit, assets, pipeline, bpy-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job must have succeeded
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          results = {
+              "lint": "${{ needs.lint.result }}",
+              "unit": "${{ needs.unit.result }}",
+              "assets": "${{ needs.assets.result }}",
+              "pipeline": "${{ needs.pipeline.result }}",
+              "bpy-tests": "${{ needs.bpy-tests.result }}",
+          }
+          for job, result in results.items():
+              print(f"{job}: {result}")
+          failed = {job: result for job, result in results.items() if result != "success"}
+          if failed:
+              print(f"::error::required jobs did not succeed: {json.dumps(failed)}")
+              sys.exit(1)
+          print("all required jobs succeeded")
+          PY
