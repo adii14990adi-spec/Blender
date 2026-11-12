@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 try:
     import bpy
+
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -66,8 +67,6 @@ def shrinkwrap_to_body(
     # Displace shell vertices along their normals toward the body surface,
     # approximating a shrinkwrap offset. For each shell vertex, find the
     # nearest body vertex and move the shell vertex toward it by `offset`.
-    import mathutils
-
     shell_mesh = shell.data
     body_mesh = body.data
     body_matrix = body.matrix_world

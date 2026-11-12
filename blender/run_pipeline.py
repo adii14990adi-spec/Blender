@@ -16,35 +16,43 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import struct
-import zlib
+import sys
 
 
 def _minimal_glb(outfit: str) -> str:
     """Write a minimal valid GLB (empty cube) using pure Python, no bpy."""
-    import math
-
     # Minimal GLB: a single cube mesh with 8 vertices, 12 triangles.
     # Header + JSON chunk + BIN chunk.
-    json_bytes = json.dumps({
-        "asset": {"version": "2.0", "generator": "Modular Clothing Pipeline"},
-        "scene": 0,
-        "scenes": [{"nodes": [0]}],
-        "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}],
-        "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 8, "type": "VEC3",
-             "max": [1, 1, 1], "min": [-1, -1, -1]},
-            {"bufferView": 1, "componentType": 5123, "count": 36, "type": "SCALAR"},
-        ],
-        "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": 96},
-            {"buffer": 0, "byteOffset": 96, "byteLength": 72},
-        ],
-        "buffers": [{"byteLength": 168}],
-        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.8, 0.8, 1]}}],
-    }, separators=(",", ":")).encode("utf-8")
+    json_bytes = json.dumps(
+        {
+            "asset": {"version": "2.0", "generator": "Modular Clothing Pipeline"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [
+                {"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}
+            ],
+            "accessors": [
+                {
+                    "bufferView": 0,
+                    "componentType": 5126,
+                    "count": 8,
+                    "type": "VEC3",
+                    "max": [1, 1, 1],
+                    "min": [-1, -1, -1],
+                },
+                {"bufferView": 1, "componentType": 5123, "count": 36, "type": "SCALAR"},
+            ],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": 96},
+                {"buffer": 0, "byteOffset": 96, "byteLength": 72},
+            ],
+            "buffers": [{"byteLength": 168}],
+            "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.8, 0.8, 1]}}],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
 
     # Pad JSON to 4-byte alignment.
     json_padded = json_bytes + b" " * ((4 - len(json_bytes) % 4) % 4)
@@ -91,7 +99,7 @@ def _minimal_glb(outfit: str) -> str:
     return out_path
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0912, PLR0915
     # Parse argv manually (no argparse to avoid exit-on-error issues).
     args = sys.argv[1:]
     stage = "validate"
@@ -137,33 +145,36 @@ def main() -> None:
     }
 
     # Try Blender pipeline first.
+    blender_succeeded = False
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from bpy_scripts import pipeline  # type: ignore
+        from bpy_scripts import pipeline  # type: ignore  # noqa: PLC0415
 
         res = pipeline.run_stage(stage, blend, region, params)
         if res.get("status") == "pass":
+            blender_succeeded = True
             result["status"] = "pass"
             result["metrics"] = res.get("metrics", {})
             result["checkpoint"] = res.get("checkpoint")
         else:
             result["metrics"]["error"] = res.get("error", "pipeline returned fail")
-    except Exception as exc:  # noqa: BLE001 - never crash
+    except Exception as exc:  # never crash
         result["metrics"]["error"] = f"{exc.__class__.__name__}: {exc}"
 
-    # Fallback: if no .glb was produced, write a minimal one manually.
+    # Fallback: if no .glb was produced by Blender, write a minimal one
+    # so downstream steps (e.g. web viewer) have something to load.
+    # The status is NOT changed to "pass" — a fallback means Blender failed.
     glb_path = os.path.join("outputs", outfit, f"{outfit}_Modular.glb")
     if not os.path.exists(glb_path):
         try:
             glb_path = _minimal_glb(outfit)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result["metrics"]["glb_fallback_error"] = str(exc)
 
     if os.path.exists(glb_path):
         result["metrics"]["glb_path"] = glb_path
         result["metrics"]["glb_file_size_bytes"] = os.path.getsize(glb_path)
-        if result["status"] == "fail":
-            result["status"] = "pass"
+        result["metrics"]["glb_is_fallback"] = not blender_succeeded
 
     # Write result JSON.
     out_dir = os.path.dirname(os.path.abspath(out))

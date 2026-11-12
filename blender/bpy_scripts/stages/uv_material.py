@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 try:
     import bpy
+
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -68,8 +69,6 @@ def unwrap_and_material(
         mesh.uv_layers.active = uv_layer
 
     # Assign simple UVs: project vertices onto XY plane.
-    import mathutils
-
     for loop in mesh.loops:
         vert = mesh.vertices[loop.vertex_index]
         world_pos = shell.matrix_world @ vert.co
@@ -91,9 +90,7 @@ def unwrap_and_material(
             tex_node = nodes.new(type="ShaderNodeTexImage")
             tex_node.image = bpy.data.images.load(texture_path)
             tex_node.name = f"Tex_{outfit}_BaseColor"
-            mat.node_tree.links.new(
-                tex_node.outputs["Color"], bsdf.inputs["Base Color"]
-            )
+            mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
             texture_loaded = True
         except Exception as exc:  # pragma: no cover
             logger.warning("texture load failed: %s", exc)
@@ -148,7 +145,6 @@ def run(
 
     op_result = unwrap_and_material(shell, outfit, texture_path=texture_path)
 
-    outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     ensure_dir(outfit_dir(outfit))
     checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME)
     try:

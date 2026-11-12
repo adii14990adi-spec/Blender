@@ -147,5 +147,3 @@ def run_full_pipeline(
         if last.get("status") != "pass":
             break
     return last
-
-# Trigger build on main for web viewer deploy
