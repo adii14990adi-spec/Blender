@@ -98,7 +98,7 @@ jobs:
   # validated GLB/FBX + validation report + preview thumbnail.
   # ---------------------------------------------------------------------------
   build:
-    name: Build ${{ matrix.variant }}
+    name: Build ${{ matrix.variant }} · ${{ matrix.outfit }}
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
@@ -158,12 +158,16 @@ jobs:
             --khronos \
             --json "/tmp/exports_${{ matrix.variant }}_${{ matrix.outfit }}.json"
 
+      # Thumbnails come from the final checkpoint, i.e. they need Blender (the
+      # system Python has no bpy). Cycles/CPU keeps this GPU-free.
       - name: Render outfit thumbnail
         run: |
           set -euo pipefail
-          python tools/render_previews.py \
+          blender -b --factory-startup --python-exit-code 1 \
+            --python tools/render_previews.py -- \
             --variant ${{ matrix.variant }} \
             --outfit ${{ matrix.outfit }} \
+            --samples 24 \
             --force
 
       - name: Upload validated assets

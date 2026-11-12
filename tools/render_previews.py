@@ -41,8 +41,10 @@ BACKGROUND = (0.045, 0.052, 0.066, 1.0)
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     if argv is None:
         argv = sys.argv[1:]
-        # Under `blender -b --python tool.py` everything after "--" is ours.
-        argv = argv[argv.index("--") + 1 :] if "--" in argv else []
+        # Under `blender -b --python tool.py` everything after "--" is ours;
+        # a plain `python tool.py --flag` passes its arguments as usual.
+        if "--" in argv:
+            argv = argv[argv.index("--") + 1 :]
     parser = argparse.ArgumentParser(description="Render garment preview thumbnails")
     parser.add_argument("--variant", action="append", help="body variant (repeatable)")
     parser.add_argument("--outfit", action="append", help="outfit id (repeatable)")

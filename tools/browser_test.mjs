@@ -265,7 +265,15 @@ async function main() {
   const extraArgs = opts.chromeArgs
     .split(/\s+/)
     .filter(Boolean)
-    .concat(['--no-sandbox', '--disable-dev-shm-usage', '--hide-scrollbars', '--mute-audio']);
+    .concat([
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--hide-scrollbars',
+      '--mute-audio',
+      // CI runners and this sandbox have no GPU: allow Chrome's software
+      // rasteriser, which recent Chrome requires an explicit opt-in for.
+      '--enable-unsafe-swiftshader',
+    ]);
 
   console.log(`site:    ${opts.site}`);
   console.log(`shots:   ${opts.shots}`);
