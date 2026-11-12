@@ -5,7 +5,7 @@ name: Blender Build
 on:
   push:
     branches: [main]
-    paths: ["blender/**", "prompts/**", "assets/**"]
+    paths: ["blender/**", "prompts/**", "assets/**", ".github/workflows/blender-build.yml"]
 
 jobs:
   build:

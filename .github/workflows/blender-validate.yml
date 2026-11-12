@@ -3,7 +3,7 @@ name: Blender Validate
 # PR gate: runs validators only. A failing validation blocks the merge.
 on:
   pull_request:
-    paths: ["blender/**", "prompts/**", "assets/**"]
+    paths: ["blender/**", "prompts/**", "assets/**", ".github/workflows/blender-validate.yml"]
 
 jobs:
   validate:
