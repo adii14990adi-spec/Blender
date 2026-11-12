@@ -1,0 +1,39 @@
+name: Blender Validate
+
+# PR gate: runs validators only. A failing validation blocks the merge.
+on:
+  pull_request:
+    paths: ["blender/**", "prompts/**", "assets/**"]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    # Pin the Blender image — never :latest (bpy API drift silently breaks the pipeline).
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/blender5-headless:5.0.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Run pipeline in validate (dry-run) mode
+        run: |
+          blender -b --python blender/run_pipeline.py -- \
+            --stage validate \
+            --blend assets/base_body/BASE_BODY.blend \
+            --region UPPER_BODY \
+            --out /tmp/validation.json
+
+      - name: Assert validation passed
+        run: |
+          python -c "
+          import json
+          r = json.load(open('/tmp/validation.json'))
+          assert r['status'] == 'pass', r
+          print('PASS:', r['metrics'])
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: /tmp/validation.json

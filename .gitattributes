@@ -1,0 +1,4 @@
+# Git LFS for binary Blender assets. outputs/ is intentionally NOT LFS-tracked.
+*.blend filter=lfs diff=lfs merge=lfs -text
+*.fbx   filter=lfs diff=lfs merge=lfs -text
+*.png   filter=lfs diff=lfs merge=lfs -text

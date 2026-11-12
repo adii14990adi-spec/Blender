@@ -1,0 +1,41 @@
+# Pipeline outputs (CI artifacts — uploaded as artifacts / to S3, never committed)
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+env/
+venv/
+.eggs/
+*.egg
+*.egg-info/
+dist/
+build/
+*.egg-info
+.hypothesis/
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Blender auto-save / version files
+*.blend1
+*.blend2
+*.blend3
+*.blend~
+thumb.blend
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

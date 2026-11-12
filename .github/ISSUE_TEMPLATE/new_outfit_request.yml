@@ -1,0 +1,26 @@
+name: New Outfit Request
+title: "[Outfit] <name>"
+labels: ["outfit-request"]
+body:
+  - type: textarea
+    id: outfit-name
+    attributes:
+      label: Outfit name
+      description: e.g. jacket_urban_01, pants_cargo_02
+      placeholder: jacket_urban_01
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Reference images
+      description: Links to front/side/back reference sheets (>50 MB go to S3 with a reference_manifest.json)
+    validations:
+      required: true
+  - type: dropdown
+    id: region
+    attributes:
+      label: Body region
+      options: [UPPER_BODY, LOWER_BODY, HEAD]
+    validations:
+      required: true
