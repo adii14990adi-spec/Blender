@@ -26,7 +26,7 @@ from bpy_scripts.stages import (  # noqa: E402 - path must be set before package
     uv_material,
     weights,
 )
-from bpy_scripts.utils.paths import validation_report_path  # noqa: E402
+from bpy_scripts.utils.paths import latest_checkpoint, validation_report_path  # noqa: E402
 from bpy_scripts.validators import (  # noqa: E402
     preflight,
     topology_check,
@@ -108,25 +108,40 @@ def run_stage(
 
 
 def _run_validate(blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Dry-run validation: open the blend and run every validator."""
+    """Dry-run validation: open the newest artifact and run every validator."""
+    outfit = params.get("outfit") or _outfit_from_blend(blend)
+    checkpoint = latest_checkpoint(outfit)
+    target = checkpoint or blend
+
     results = {}
     overall = "pass"
     for name, mod in VALIDATOR_REGISTRY.items():
         try:
-            res = mod.run(blend_path=blend, region=region, params=params)
+            res = mod.run(blend_path=target, region=region, params=params)
         except Exception as exc:  # validator boundary must never crash
             res = {"status": "fail", "metrics": {"error": f"{exc.__class__.__name__}: {exc}"}}
         results[name] = res
         if res.get("status") != "pass":
             overall = "fail"
 
-    outfit = params.get("outfit") or _outfit_from_blend(blend)
     report = {
         "outfit": outfit,
         "stage": "validate",
         "status": overall,
-        "metrics": {"validators": results},
-        "checkpoint": None,
+        "metrics": {
+            "validators": results,
+            "validated_path": target,
+            "validated_source": "checkpoint" if checkpoint else "base_blend",
+        },
+        "checkpoint": checkpoint,
+        "error": (
+            "; ".join(
+                f"{name}: {res.get('metrics', {}).get('error', 'failed')}"
+                for name, res in results.items()
+                if res.get("status") != "pass"
+            )
+            or None
+        ),
     }
     _write_report(outfit, report)
     return report
@@ -140,6 +155,7 @@ def run_full_pipeline(
     """Run all stages in order; stop at the first failure (guardrail)."""
     params = params or {}
     outfit = params.get("outfit") or _outfit_from_blend(blend)
+    params = {**params, "outfit": outfit}  # every stage writes to the same outfit
     last: Dict[str, Any] = {"status": "pass"}
     for stage in STAGE_ORDER:
         last = run_stage(stage, blend, region, params)

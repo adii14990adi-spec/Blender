@@ -10,15 +10,15 @@ OUT_DIR := outputs
 .PHONY: validate build test lint format clean
 
 validate: ## Run the validate stage only (PR gate)
-	$(BLEND) -b --python blender/run_pipeline.py -- \
+	$(BLEND) -b --python-exit-code 1 --python blender/run_pipeline.py -- \
 		--stage validate \
 		--blend $(BASE) \
 		--region $(REGION) \
 		--out /tmp/validation.json
 
-build: ## Run the full pipeline end-to-end and export FBX
-	$(BLEND) -b --python blender/run_pipeline.py -- \
-		--stage export \
+build: ## Run the full pipeline end-to-end and export FBX + GLB
+	$(BLEND) -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+		--stage all \
 		--blend $(BASE) \
 		--region $(REGION) \
 		--params "{\"outfit\": \"$(OUTFIT)\"}" \

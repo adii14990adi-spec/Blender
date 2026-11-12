@@ -13,8 +13,8 @@ except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
     _HAS_BPY = False
 
-from ...utils.logging import get_logger
-from ...utils.paths import checkpoint_path, ensure_dir, outfit_dir
+from ..utils.logging import get_logger
+from ..utils.paths import checkpoint_path, ensure_dir, input_blend_path, outfit_dir
 
 logger = get_logger("stages.shrinkwrap")
 
@@ -112,22 +112,24 @@ def run(
             "checkpoint": None,
         }
 
+    outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
+    input_path, input_info = input_blend_path(blend_path, outfit, STAGE_INDEX)
+
     bpy.ops.wm.read_factory_settings(use_empty=True)
     try:
-        bpy.ops.wm.open_mainfile(filepath=blend_path)
-    except Exception:
-        pass
+        bpy.ops.wm.open_mainfile(filepath=input_path)
+    except Exception as exc:
+        return _fail(f"could not open {input_path}: {exc}", {"input": input_info})
 
     shell = _find(SHELL_OBJECT_NAME)
     body = _find(BASE_BODY_NAME)
     if shell is None:
-        return _fail("CLOTH_Shell not found — run shell stage first")
+        return _fail("CLOTH_Shell not found — run shell stage first", {"input": input_info})
     if body is None:
-        return _fail("BASE_BODY not found in blend")
+        return _fail("BASE_BODY not found in blend", {"input": input_info})
 
-    op_result = shrinkwrap_to_body(shell, body, offset=offset)
+    op_result = {**shrinkwrap_to_body(shell, body, offset=offset), "input": input_info}
 
-    outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     ensure_dir(outfit_dir(outfit))
     checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME)
     try:

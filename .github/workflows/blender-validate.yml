@@ -13,7 +13,25 @@ jobs:
         with:
           lfs: true
 
+      # The committed BASE_BODY.blend is still a placeholder stub in this repo.
+      # Validators can only run against a real .blend, so the gate reports that
+      # loudly and skips instead of blocking every PR with an unrelated error.
+      - name: Detect base body asset
+        id: asset
+        run: |
+          if head -c 7 assets/base_body/BASE_BODY.blend | grep -q "BLENDER"; then
+            echo "real=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "real=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip validators (placeholder base body)
+        if: steps.asset.outputs.real != 'true'
+        run: |
+          echo "::warning title=PR gate skipped::assets/base_body/BASE_BODY.blend is a placeholder stub, not a real Blender file, so there is nothing to validate. Export a real base body and commit it with Git LFS to enable this gate."
+
       - name: Install headless Blender 5.0.0
+        if: steps.asset.outputs.real == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -25,23 +43,29 @@ jobs:
           blender --version
 
       - name: Run pipeline in validate (dry-run) mode
+        if: steps.asset.outputs.real == 'true'
         run: |
-          blender -b --python blender/run_pipeline.py -- \
+          blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
             --stage validate \
             --blend assets/base_body/BASE_BODY.blend \
             --region UPPER_BODY \
             --out /tmp/validation.json
 
       - name: Assert validation produced outputs
+        if: steps.asset.outputs.real == 'true'
         run: |
           python -c "
-          import json, os, sys
+          import json
           r = json.load(open('/tmp/validation.json'))
-          assert 'status' in r, f'no status in result: {r}'
-          print('VALIDATE:', r.get('status'), r.get('metrics', {}))
+          assert r['status'] == 'pass', r
+          validators = r['metrics']['validators']
+          failed = {k: v for k, v in validators.items() if v.get('status') != 'pass'}
+          assert not failed, failed
+          print('VALIDATE PASS:', r['metrics'].get('validated_path'), list(validators))
           " || { echo "VALIDATE FAILED"; cat /tmp/validation.json; exit 1; }
 
       - uses: actions/upload-artifact@v4
+        if: steps.asset.outputs.real == 'true'
         with:
           name: validation-report
           path: /tmp/validation.json
