@@ -126,7 +126,7 @@ def _run(stage: str, blend: str, region: str, params: Dict[str, Any]) -> Dict[st
     return pipeline.run_stage(stage, blend, region, params)
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: List[str] | None = None) -> int:  # noqa: PLR0915
     args = _parse_args(sys.argv[1:] if argv is None else argv)
 
     if args["list_assets"]:
@@ -177,6 +177,15 @@ def main(argv: List[str] | None = None) -> int:
                 "--allow-fallback-glb was removed on purpose: a build must never publish a "
                 "placeholder GLB. Fix the export instead."
             )
+
+        # Validate the .blend before Blender is asked to open it: the message is
+        # actionable, and `--stage validate` can report a bad asset even where
+        # bpy is unavailable (unit tests, tooling).
+        from bpy_scripts import config
+
+        blend_check = config.inspect_blend_file(blend)
+        if not blend_check["ok"]:
+            raise ValueError(f"base body is not usable: {blend_check['reason']}")
 
         result.update({"outfit": outfit, "variant": variant.name, "region": region})
         result["inputs"] = {

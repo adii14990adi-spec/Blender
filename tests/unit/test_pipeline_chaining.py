@@ -136,7 +136,8 @@ def test_cli_routes_full_run_aliases_to_run_full_pipeline(
     monkeypatch, tmp_path, stage_flag: str
 ) -> None:
     blend = tmp_path / "base_body_Male.blend"
-    blend.write_bytes(b"BLENDER-v300" + b"\x00" * 64)
+    # >= config.MIN_BLEND_BYTES so the header check accepts it as a real file.
+    blend.write_bytes(b"BLENDER-v300" + b"\x00" * 8192)
     out = tmp_path / "result.json"
 
     seen: dict = {}

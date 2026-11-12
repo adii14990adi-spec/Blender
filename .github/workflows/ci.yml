@@ -65,36 +65,25 @@ jobs:
       - name: Both base bodies must be real Blender files
         run: |
           python - <<'PY'
-          import json, pathlib, sys
+          import pathlib
+          import sys
 
-          root = pathlib.Path(".")
-          manifest = json.loads((root / "assets/base_body/manifest.json").read_text())
-          variants = manifest["variants"]
+          sys.path.insert(0, "blender")
+          from bpy_scripts import config
+
           problems = []
-          for name in ("male", "female"):
-              entry = variants.get(name)
-              if not entry:
-                  problems.append(f"{name}: missing from assets/base_body/manifest.json")
-                  continue
-              path = root / entry["file"]
-              if not path.exists():
-                  problems.append(f"{name}: {path} does not exist")
-                  continue
-              head = path.open("rb").read(16)
-              if not head.startswith(b"BLENDER"):
-                  problems.append(
-                      f"{name}: {path} is not a Blender file (starts with {head[:24]!r}); "
-                      "is it a Git LFS pointer?"
-                  )
-              if path.stat().st_size < 4096:
-                  problems.append(f"{name}: {path} is only {path.stat().st_size} bytes")
+          for name in config.variant_names():
+              variant = config.resolve_variant(name)
+              check = config.inspect_blend_file(variant.path)
+              print(f"{name}: {variant.path} -> {check['size']} bytes, ok={check['ok']}")
+              if not check["ok"]:
+                  problems.append(f"{name}: {check['reason']}")
 
-          legacy = root / "assets/base_body/BASE_BODY.blend"
+          legacy = pathlib.Path("assets/base_body/BASE_BODY.blend")
           if legacy.exists():
-              print(f"::warning::legacy {legacy} still present; it is no longer used")
+              print(f"::warning::{legacy} is no longer used by the pipeline")
 
-          outfit_manifest = json.loads((root / "assets/outfits/outfits.json").read_text())
-          if "jacket_urban_01" not in outfit_manifest["outfits"]:
+          if "jacket_urban_01" not in config.outfit_names():
               problems.append("outfit jacket_urban_01 missing from assets/outfits/outfits.json")
 
           for problem in problems:
@@ -103,7 +92,7 @@ jobs:
           PY
 
   pipeline:
-    name: Blender pipeline (${{ matrix.variant }})
+    name: Blender pipeline
     needs: assets
     runs-on: ubuntu-latest
     strategy:
