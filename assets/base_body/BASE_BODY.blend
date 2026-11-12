@@ -1,8 +1,0 @@
-# PLACEHOLDER — replace with a real Blender file tracked by Git LFS.
-#
-# This file should contain:
-#   - A mesh object named "BASE_BODY" (the base body rig)
-#   - Vertex groups per clothing region (UPPER_BODY / LOWER_BODY / HEAD)
-#
-# Do not commit real .blend files without Git LFS (see .gitattributes).
-# Run `git lfs track "*.blend"` and replace this stub with the exported blend.
