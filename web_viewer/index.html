@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Modular Clothing Review</title>
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      background-color: #1e1e1e;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    model-viewer {
+      width: 100vw;
+      height: 100vh;
+      background-color: #1e1e1e;
+    }
+    .controls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      color: white;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(6px);
+      padding: 14px 18px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      max-width: 260px;
+    }
+    .controls h3 {
+      margin: 0 0 6px 0;
+      font-size: 16px;
+      letter-spacing: 0.4px;
+    }
+    .controls p {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      color: #cfcfcf;
+    }
+    .controls .btn-group {
+      display: flex;
+      gap: 8px;
+    }
+    .controls button {
+      flex: 1;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #111;
+      background: #ffffff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .controls button:hover {
+      background: #e5e5e5;
+    }
+    .controls button:active {
+      background: #d0d0d0;
+    }
+    .status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #8fb0ff;
+      min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <h3>Asset Review</h3>
+    <p>Drag to Rotate &bull; Scroll to Zoom</p>
+    <div class="btn-group">
+      <button onclick="document.querySelector('model-viewer').play()">Play Animations</button>
+      <button onclick="document.querySelector('model-viewer').pause()">Pause</button>
+    </div>
+    <div class="status" id="status">Loading model&hellip;</div>
+  </div>
+
+  <!--
+    Exported by the headless Blender pipeline at:
+    outputs/<outfit>/<outfit>_Modular.glb
+    Deployed to GitHub Pages under docs/ by deploy-web-viewer.yml.
+  -->
+  <model-viewer
+    id="viewer"
+    src="./outputs/jacket_urban_01/jacket_urban_01_Modular.glb"
+    alt="Modular Jacket — Urban 01"
+    camera-controls
+    autoplay
+    ar
+    shadow-intensity="1"
+    environment-image="neutral"
+    camera-orbit="0deg 75deg 2m"
+    reveal-when="interaction"
+  >
+  </model-viewer>
+
+  <script>
+    const viewer = document.querySelector("model-viewer");
+    const status = document.getElementById("status");
+    viewer.addEventListener("load", () => {
+      status.textContent = "Model loaded — ready for review";
+      status.style.color = "#8ff0a3";
+    });
+    viewer.addEventListener("error", (event) => {
+      status.textContent = "Failed to load model: " + event.detail;
+      status.style.color = "#ff8a8a";
+    });
+  </script>
+</body>
+</html>

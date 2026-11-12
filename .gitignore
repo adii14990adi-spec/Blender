@@ -1,5 +1,6 @@
 # Pipeline outputs (CI artifacts — uploaded as artifacts / to S3, never committed)
 outputs/
+docs/
 
 # Python
 __pycache__/

@@ -15,7 +15,13 @@ except ImportError:  # pragma: no cover - allows import / lint outside Blender
     _HAS_BPY = False
 
 from ...utils.logging import get_logger
-from ...utils.paths import ensure_dir, fbx_export_path, outfit_dir, validation_report_path
+from ...utils.paths import (
+    ensure_dir,
+    fbx_export_path,
+    glb_export_path,
+    outfit_dir,
+    validation_report_path,
+)
 
 logger = get_logger("stages.export_fbx")
 
@@ -90,6 +96,41 @@ def export_fbx(shell: "bpy.types.Object", outfit: str, fbx_path: str) -> Dict[st
     }
 
 
+def export_glb(shell: "bpy.types.Object", outfit: str, glb_path: str) -> Dict[str, Any]:
+    """Core bpy operation: export CLOTH_Shell to GLB for web review.
+
+    GLB is the web-friendly counterpart to the Unity FBX. Animations are
+    exported so rigging/clipping can be validated in a browser viewer.
+    """
+    # Deselect everything, select only the shell.
+    bpy.ops.object.select_all(action="DESELECT")
+    shell.select_set(True)
+    bpy.context.view_layer.objects.active = shell
+
+    os.makedirs(os.path.dirname(glb_path), exist_ok=True)
+    bpy.ops.export_scene.gltf(
+        filepath=glb_path,
+        check_existing=True,
+        use_selection=True,
+        export_format="GLB",
+        export_apply=True,
+        export_animations=True,
+        export_yup=True,
+    )
+
+    file_size = os.path.getsize(glb_path) if os.path.exists(glb_path) else 0
+    return {
+        "status": "pass",
+        "glb_path": glb_path,
+        "glb_file_size_bytes": file_size,
+        "web_flags": {
+            "export_animations": True,
+            "export_apply": True,
+            "axis_up": "Y",
+        },
+    }
+
+
 def run(
     blend_path: str,
     region: str = "UPPER_BODY",
@@ -100,6 +141,7 @@ def run(
     params = params or {}
     outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     fbx_path = fbx_export_path(outfit)
+    glb_path = glb_export_path(outfit)
     report_path = validation_report_path(outfit)
 
     if not _HAS_BPY:
@@ -117,6 +159,7 @@ def run(
     if shell is None:
         return _fail("CLOTH_Shell not found — run all prior stages first")
 
+    # FBX export for Unity.
     op_result = export_fbx(shell, outfit, fbx_path)
     if op_result.get("status") != "pass":
         return {
@@ -125,6 +168,19 @@ def run(
             "metrics": op_result,
             "checkpoint": None,
         }
+
+    # GLB export for web review.
+    glb_result = export_glb(shell, outfit, glb_path)
+    if glb_result.get("status") != "pass":
+        return {
+            "status": "fail",
+            "stage": STAGE_NAME,
+            "metrics": {**op_result, **glb_result, "error": "glb export failed"},
+            "checkpoint": None,
+        }
+
+    # Merge FBX + GLB metrics.
+    op_result = {**op_result, **glb_result}
 
     # Final checkpoint + validation report.
     ensure_dir(outfit_dir(outfit))

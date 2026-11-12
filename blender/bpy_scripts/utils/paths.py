@@ -35,6 +35,10 @@ def fbx_export_path(outfit: str) -> str:
     return os.path.join(outfit_dir(outfit), f"{outfit}_Modular.fbx")
 
 
+def glb_export_path(outfit: str) -> str:
+    return os.path.join(outfit_dir(outfit), f"{outfit}_Modular.glb")
+
+
 def ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
