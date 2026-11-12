@@ -15,11 +15,12 @@ except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
     _HAS_BPY = False
 
-from ...utils.logging import get_logger
-from ...utils.paths import (
+from ..utils.logging import get_logger
+from ..utils.paths import (
     ensure_dir,
     fbx_export_path,
     glb_export_path,
+    input_blend_path,
     outfit_dir,
     validation_report_path,
 )
@@ -59,141 +60,104 @@ def _find(name: str):
     return None
 
 
-def _write_minimal_fbx(fbx_path: str) -> None:
-    """Write a minimal FBX placeholder file (7.0.0 binary header only).
+def _ensure_linked(obj: "bpy.types.Object") -> None:
+    """Selection operators need the object in the active view layer (headless)."""
+    try:
+        if obj.name not in bpy.context.view_layer.objects:  # type: ignore[attr-defined]
+            bpy.context.collection.objects.link(obj)  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - context dependent
+        logger.warning("could not link %s into the active collection", obj.name)
 
-    Used as a fallback when bpy.ops.export_scene.fbx is unavailable
-    in headless mode. Contains just enough to be a valid FBX file stub.
+
+def _filter_supported_kwargs(op: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop kwargs the installed Blender's exporter does not know about.
+
+    The FBX operator's property set drifts between Blender releases
+    (``apply_scaling_options`` vs ``apply_scale_options``,
+    ``use_mesh_modifiers_render`` disappearing, …). Passing an unknown kwarg
+    raises TypeError, which used to be swallowed and turned into a stub file.
     """
-    # FBX 7.0.0 binary header
-    header = b"\x21\x3c\x3d\x77\x66\x62\x69\x78"  # "Kaydara FBX Binary"
-    version = b"\x00\x00\x00\x07"  # version 7000
-    flags = b"\x00\x00\x00\x00"
-    with open(fbx_path, "wb") as f:
-        f.write(header + version + flags)
+    try:
+        supported = {prop.identifier for prop in op.get_rna_type().properties}
+    except Exception:  # pragma: no cover - RNA introspection unavailable
+        return kwargs
+    unknown = sorted(set(kwargs) - supported)
+    if unknown:
+        logger.warning("FBX exporter does not support %s — dropping them", unknown)
+    return {key: value for key, value in kwargs.items() if key in supported}
 
 
-def _write_minimal_glb(glb_path: str) -> None:
-    """Write a minimal valid GLB (empty cube) using pure Python."""
-    json_bytes = json.dumps(
-        {
-            "asset": {"version": "2.0", "generator": "Modular Clothing Pipeline"},
-            "scene": 0,
-            "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0}],
-            "meshes": [
-                {
-                    "primitives": [
-                        {
-                            "attributes": {"POSITION": 0},
-                            "indices": 1,
-                            "material": 0,
-                        }
-                    ]
-                }
-            ],
-            "accessors": [
-                {
-                    "bufferView": 0,
-                    "componentType": 5126,
-                    "count": 8,
-                    "type": "VEC3",
-                    "max": [1, 1, 1],
-                    "min": [-1, -1, -1],
-                },
-                {
-                    "bufferView": 1,
-                    "componentType": 5123,
-                    "count": 36,
-                    "type": "SCALAR",
-                },
-            ],
-            "bufferViews": [
-                {"buffer": 0, "byteOffset": 0, "byteLength": 96},
-                {"buffer": 0, "byteOffset": 96, "byteLength": 72},
-            ],
-            "buffers": [{"byteLength": 168}],
-            "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.8, 0.8, 1]}}],
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    json_padded = json_bytes + b" " * ((4 - len(json_bytes) % 4) % 4)
-
-    positions = []
-    for x in (-1.0, 1.0):
-        for y in (-1.0, 1.0):
-            for z in (-1.0, 1.0):
-                positions.extend([x, y, z])
-    pos_bytes = struct.pack("<24f", *positions)
-    indices = []
-    faces = [
-        (0, 1, 2, 1, 3, 2),
-        (4, 6, 5, 6, 7, 5),
-        (0, 4, 5, 0, 5, 1),
-        (2, 3, 7, 2, 7, 6),
-        (0, 2, 6, 0, 6, 4),
-        (1, 5, 7, 1, 7, 3),
-    ]
-    for f in faces:
-        indices.extend(f)
-    idx_bytes = struct.pack("<36H", *indices)
-
-    bin_data = pos_bytes + idx_bytes
-    bin_padded = bin_data + b"\x00" * ((4 - len(bin_data) % 4) % 4)
-
-    header = struct.pack("<4sII", b"glTF", 2, 12 + len(json_padded) + 8 + len(bin_padded))
-    json_chunk = struct.pack("<II", len(json_padded), 0x4E4F534A) + json_padded
-    bin_chunk = struct.pack("<II", len(bin_padded), 0x004E4942) + bin_padded
-
-    glb_bytes = header + json_chunk + bin_chunk
-
-    with open(glb_path, "wb") as f:
-        f.write(glb_bytes)
+def _ensure_fbx_exporter() -> str | None:
+    """Enable the bundled FBX add-on if this Blender still ships it as one."""
+    try:
+        module = "io_scene_fbx"
+        if hasattr(bpy.ops.export_scene, "fbx"):
+            return None
+        bpy.ops.preferences.addon_enable(module=module)
+        return None
+    except Exception as exc:  # pragma: no cover - depends on Blender build
+        return f"{exc.__class__.__name__}: {exc}"
 
 
 def export_fbx(shell: "bpy.types.Object", outfit: str, fbx_path: str) -> Dict[str, Any]:
     """Core bpy operation: export CLOTH_Shell to FBX with Unity flags.
 
-    Uses bpy.ops.export_scene.fbx which works in headless Blender mode.
-    Falls back to writing a minimal FBX header if the export operator fails.
+    Uses bpy.ops.export_scene.fbx which works in headless Blender mode. A failed
+    export is reported as ``status: fail`` — never replaced by a stub file, so
+    CI cannot go green on an FBX that Unity would reject.
     """
     os.makedirs(os.path.dirname(fbx_path), exist_ok=True)
 
+    addon_error = _ensure_fbx_exporter()
+    if addon_error:
+        return {"status": "fail", "error": f"FBX exporter unavailable: {addon_error}"}
+    if not hasattr(bpy.ops.export_scene, "fbx"):  # pragma: no cover - Blender build
+        return {"status": "fail", "error": "bpy.ops.export_scene.fbx is not available"}
+
+    if os.path.exists(fbx_path):
+        os.remove(fbx_path)  # never let a stale file pass for a fresh export
+
+    unity_kwargs: Dict[str, Any] = {
+        "filepath": fbx_path,
+        "check_existing": False,
+        "use_selection": True,
+        "apply_scale_options": "FBX_SCALE_ALL",
+        "axis_forward": "-Z",
+        "axis_up": "Y",
+        "object_types": {"ARMATURE", "MESH"},
+        "use_mesh_modifiers": True,
+        "mesh_smooth_type": "OFF",
+        "add_leaf_bones": False,
+        "primary_bone_axis": "Y",
+        "secondary_bone_axis": "X",
+    }
+
     try:
-        # Deselect everything, select only the shell.
-        bpy.ops.object.select_all(action="DESELECT")
+        # Deselect everything, select only the shell. In -b there is no UI
+        # context, so fall back to deselecting objects directly.
+        _ensure_linked(shell)
+        try:
+            bpy.ops.object.select_all(action="DESELECT")
+        except Exception:  # pragma: no cover - no objects / no context
+            for obj in bpy.context.view_layer.objects:
+                obj.select_set(False)
         shell.select_set(True)
         bpy.context.view_layer.objects.active = shell
-
-        bpy.ops.export_scene.fbx(
-            filepath=fbx_path,
-            check_existing=True,
-            use_selection=True,
-            apply_modifiers=True,
-            apply_scaling_options="FBX_SCALE_ALL",
-            axis_forward="-Z",
-            axis_up="Y",
-            object_types={"ARMATURE", "MESH"},
-            use_mesh_modifiers=True,
-            use_mesh_modifiers_render=True,
-            mesh_smooth_type="OFF",
-            add_leaf_bones=False,
-            primary_bone_axis="Y",
-            secondary_bone_axis="X",
-        )
+        bpy.ops.export_scene.fbx(**_filter_supported_kwargs(bpy.ops.export_scene.fbx, unity_kwargs))
     except Exception as exc:  # bpy.ops may fail in headless mode
-        logger.warning("FBX export operator failed: %s", exc)
-        # Write a minimal FBX placeholder so downstream steps don't break
-        _write_minimal_fbx(fbx_path)
+        detail = f"{exc.__class__.__name__}: {exc}"
+        logger.error("FBX export failed: %s", detail)
+        return {"status": "fail", "error": f"FBX export failed: {detail}", "fbx_path": None}
 
-    file_size = os.path.getsize(fbx_path) if os.path.exists(fbx_path) else 0
+    if not os.path.exists(fbx_path) or os.path.getsize(fbx_path) == 0:
+        return {"status": "fail", "error": "FBX exporter produced no file", "fbx_path": None}
+
     return {
         "status": "pass",
         "fbx_path": fbx_path,
-        "fbx_file_size_bytes": file_size,
+        "fbx_file_size_bytes": os.path.getsize(fbx_path),
         "unity_flags": {
-            "apply_modifiers": True,
+            "apply_scale_options": "FBX_SCALE_ALL",
             "axis_forward": "-Z",
             "axis_up": "Y",
             "mesh_smooth_type": "OFF",
@@ -305,16 +269,22 @@ def export_glb(shell: "bpy.types.Object", outfit: str, glb_path: str) -> Dict[st
 
         with open(glb_path, "wb") as f:
             f.write(glb_bytes)
-    except Exception as exc:  # never crash
-        logger.warning("GLB export via bpy.data failed: %s", exc)
-        # Final fallback: write minimal cube GLB
-        _write_minimal_glb(glb_path)
+    except Exception as exc:  # a fake cube must never stand in for the garment
+        detail = f"{exc.__class__.__name__}: {exc}"
+        logger.error("GLB export via bpy.data failed: %s", detail)
+        return {
+            "status": "fail",
+            "error": f"GLB export failed: {detail}",
+            "glb_path": None,
+        }
 
-    file_size = os.path.getsize(glb_path) if os.path.exists(glb_path) else 0
+    if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
+        return {"status": "fail", "error": "GLB writer produced no file", "glb_path": None}
+
     return {
         "status": "pass",
         "glb_path": glb_path,
-        "glb_file_size_bytes": file_size,
+        "glb_file_size_bytes": os.path.getsize(glb_path),
         "web_flags": {
             "export_animations": True,
             "export_apply": True,
@@ -344,15 +314,23 @@ def run(
             "checkpoint": None,
         }
 
+    input_path, input_info = input_blend_path(blend_path, outfit, STAGE_INDEX)
+
     bpy.ops.wm.read_factory_settings(use_empty=True)
     try:
-        bpy.ops.wm.open_mainfile(filepath=blend_path)
-    except Exception:
-        pass
+        bpy.ops.wm.open_mainfile(filepath=input_path)
+    except Exception as exc:
+        return _fail(f"could not open {input_path}: {exc}", {"input": input_info})
+
+    object_names = [obj.name for obj in bpy.data.objects]
+    logger.info("opened %s: %d objects %s", input_path, len(object_names), object_names)
 
     shell = _find(SHELL_OBJECT_NAME)
     if shell is None:
-        return _fail("CLOTH_Shell not found — run all prior stages first")
+        return _fail(
+            "CLOTH_Shell not found — run all prior stages first",
+            {"input": input_info, "objects": object_names},
+        )
 
     # FBX export for Unity.
     op_result = export_fbx(shell, outfit, fbx_path)
@@ -375,7 +353,7 @@ def run(
         }
 
     # Merge FBX + GLB metrics.
-    op_result = {**op_result, **glb_result}
+    op_result = {**op_result, **glb_result, "input": input_info}
 
     # Final checkpoint + validation report.
     ensure_dir(outfit_dir(outfit))

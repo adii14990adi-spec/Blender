@@ -26,7 +26,7 @@ from bpy_scripts.stages import (  # noqa: E402 - path must be set before package
     uv_material,
     weights,
 )
-from bpy_scripts.utils.paths import validation_report_path  # noqa: E402
+from bpy_scripts.utils.paths import latest_checkpoint, validation_report_path  # noqa: E402
 from bpy_scripts.validators import (  # noqa: E402
     preflight,
     topology_check,
@@ -108,25 +108,40 @@ def run_stage(
 
 
 def _run_validate(blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Dry-run validation: open the blend and run every validator."""
+    """Dry-run validation: open the newest artifact and run every validator."""
+    outfit = params.get("outfit") or _outfit_from_blend(blend)
+    checkpoint = latest_checkpoint(outfit)
+    target = checkpoint or blend
+
     results = {}
     overall = "pass"
     for name, mod in VALIDATOR_REGISTRY.items():
         try:
-            res = mod.run(blend_path=blend, region=region, params=params)
+            res = mod.run(blend_path=target, region=region, params=params)
         except Exception as exc:  # validator boundary must never crash
             res = {"status": "fail", "metrics": {"error": f"{exc.__class__.__name__}: {exc}"}}
         results[name] = res
         if res.get("status") != "pass":
             overall = "fail"
 
-    outfit = params.get("outfit") or _outfit_from_blend(blend)
     report = {
         "outfit": outfit,
         "stage": "validate",
         "status": overall,
-        "metrics": {"validators": results},
-        "checkpoint": None,
+        "metrics": {
+            "validators": results,
+            "validated_path": target,
+            "validated_source": "checkpoint" if checkpoint else "base_blend",
+        },
+        "checkpoint": checkpoint,
+        "error": (
+            "; ".join(
+                f"{name}: {res.get('metrics', {}).get('error', 'failed')}"
+                for name, res in results.items()
+                if res.get("status") != "pass"
+            )
+            or None
+        ),
     }
     _write_report(outfit, report)
     return report
@@ -137,13 +152,30 @@ def run_full_pipeline(
     region: str = "UPPER_BODY",
     params: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Run all stages in order; stop at the first failure (guardrail)."""
-    params = params or {}
+    """Run all stages in order, chaining checkpoints; stop at the first failure.
+
+    Stage N+1 opens the checkpoint stage N saved (``last["checkpoint"]``), not
+    the base body again — otherwise shrinkwrap/weights/uv/export can never see
+    the ``CLOTH_Shell`` object created by stage 1.
+
+    ``params["outfit"]`` is pinned up front: without it a stage would derive the
+    outfit name from the checkpoint filename (``01_shrinkwrapped``) and write to
+    the wrong ``outputs/`` folder.
+    """
+    params = dict(params or {})
     outfit = params.get("outfit") or _outfit_from_blend(blend)
+    params["outfit"] = outfit
+
+    current_blend = blend
     last: Dict[str, Any] = {"status": "pass"}
     for stage in STAGE_ORDER:
-        last = run_stage(stage, blend, region, params)
-        last["outfit"] = outfit
+        stage_result = run_stage(stage, current_blend, region, params)
+        stage_result.setdefault("metrics", {})
+        if isinstance(stage_result["metrics"], dict):
+            stage_result["metrics"]["input_blend"] = current_blend
+        stage_result["outfit"] = outfit
+        last = stage_result
         if last.get("status") != "pass":
             break
+        current_blend = last.get("checkpoint") or current_blend
     return last

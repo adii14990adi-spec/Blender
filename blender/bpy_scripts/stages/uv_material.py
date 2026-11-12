@@ -13,8 +13,8 @@ except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
     _HAS_BPY = False
 
-from ...utils.logging import get_logger
-from ...utils.paths import ASSETS_ROOT, checkpoint_path, ensure_dir, outfit_dir
+from ..utils.logging import get_logger
+from ..utils.paths import ASSETS_ROOT, checkpoint_path, ensure_dir, input_blend_path, outfit_dir
 
 logger = get_logger("stages.uv_material")
 
@@ -133,17 +133,25 @@ def run(
             "checkpoint": None,
         }
 
+    input_path, input_info = input_blend_path(blend_path, outfit, STAGE_INDEX)
+
     bpy.ops.wm.read_factory_settings(use_empty=True)
     try:
-        bpy.ops.wm.open_mainfile(filepath=blend_path)
-    except Exception:
-        pass
+        bpy.ops.wm.open_mainfile(filepath=input_path)
+    except Exception as exc:
+        return _fail(f"could not open {input_path}: {exc}", {"input": input_info})
 
     shell = _find(SHELL_OBJECT_NAME)
     if shell is None:
-        return _fail("CLOTH_Shell not found — run shell/shrinkwrap/weights first")
+        return _fail(
+            "CLOTH_Shell not found — run shell/shrinkwrap/weights first",
+            {"input": input_info},
+        )
 
-    op_result = unwrap_and_material(shell, outfit, texture_path=texture_path)
+    op_result = {
+        **unwrap_and_material(shell, outfit, texture_path=texture_path),
+        "input": input_info,
+    }
 
     ensure_dir(outfit_dir(outfit))
     checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME)

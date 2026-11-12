@@ -2,14 +2,25 @@
 
 Invoked by GitHub Actions:
 
-    blender -b --python blender/run_pipeline.py -- \
-        --stage validate \
+    blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
+        --stage full \
         --blend assets/base_body/BASE_BODY.blend \
         --region UPPER_BODY \
-        --out /tmp/validation.json
+        --params '{"outfit": "jacket_urban_01"}' \
+        --out /tmp/build.json
 
 Each stage saves its own .blend checkpoint under outputs/<outfit>/ so the
 pipeline is resumable.
+
+Exit codes
+----------
+0   every requested stage passed
+1   a stage failed, a module failed to import, or an input was unusable
+
+The failure detail is always written to ``--out`` as JSON before exiting, so CI
+can print it. Pass ``--allow-fallback-glb`` if a placeholder GLB should be
+written when Blender fails (flagged with ``glb_is_fallback: true``); it is off
+by default so a broken build never ships a fake asset.
 """
 
 from __future__ import annotations
@@ -18,9 +29,40 @@ import json
 import os
 import struct
 import sys
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Dict
+
+# --- import bootstrap --------------------------------------------------------
+# Blender runs this file as a top-level script (``__main__``), so there is no
+# parent package for relative imports to resolve against. Put ``blender/`` on
+# ``sys.path`` and use absolute ``bpy_scripts.*`` imports everywhere. Never add
+# the repo root here too: importing the same module as both ``bpy_scripts.x``
+# and ``blender.bpy_scripts.x`` is what triggers
+# "attempted relative import beyond top-level package".
+BLENDER_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BLENDER_DIR.parent
+if str(BLENDER_DIR) not in sys.path:
+    sys.path.insert(0, str(BLENDER_DIR))
+
+# "full" is the documented name for the whole run; "all" is kept as an alias.
+FULL_RUN_ALIASES = ("full", "all")
+STAGES = (
+    "validate",
+    "full",
+    "all",
+    "shell",
+    "shrinkwrap",
+    "weights",
+    "uv",
+    "material",
+    "export",
+)
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
-def _minimal_glb(outfit: str) -> str:
+def _minimal_glb(out_path: str) -> str:
     """Write a minimal valid GLB (empty cube) using pure Python, no bpy."""
     # Minimal GLB: a single cube mesh with 8 vertices, 12 triangles.
     # Header + JSON chunk + BIN chunk.
@@ -92,102 +134,205 @@ def _minimal_glb(outfit: str) -> str:
 
     glb_bytes = header + json_chunk + bin_chunk
 
-    out_path = os.path.join("outputs", outfit, f"{outfit}_Modular.glb")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(glb_bytes)
     return out_path
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915
-    # Parse argv manually (no argparse to avoid exit-on-error issues).
-    args = sys.argv[1:]
-    stage = "validate"
-    region = "UPPER_BODY"
-    blend = ""
-    params_str = "{}"
-    out = "/tmp/result.json"
+def _parse_args(argv: list[str]) -> Dict[str, Any]:
+    """Parse argv manually (no argparse to avoid exit-on-error issues)."""
+    args = {
+        "stage": "validate",
+        "region": "UPPER_BODY",
+        "blend": "",
+        "params": "{}",
+        "out": "/tmp/result.json",
+        "allow_fallback_glb": False,
+    }
+    flag_for = {
+        "--stage": "stage",
+        "--region": "region",
+        "--blend": "blend",
+        "--params": "params",
+        "--out": "out",
+    }
 
     i = 0
-    while i < len(args):
-        if args[i] == "--stage" and i + 1 < len(args):
-            stage = args[i + 1]
-            i += 2
-        elif args[i] == "--region" and i + 1 < len(args):
-            region = args[i + 1]
-            i += 2
-        elif args[i] == "--blend" and i + 1 < len(args):
-            blend = args[i + 1]
-            i += 2
-        elif args[i] == "--params" and i + 1 < len(args):
-            params_str = args[i + 1]
-            i += 2
-        elif args[i] == "--out" and i + 1 < len(args):
-            out = args[i + 1]
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--allow-fallback-glb":
+            args["allow_fallback_glb"] = True
+            i += 1
+        elif arg in flag_for and i + 1 < len(argv):
+            args[flag_for[arg]] = argv[i + 1]
             i += 2
         else:
             i += 1
+    return args
 
-    try:
-        params = json.loads(params_str)
-    except Exception:
-        params = {}
 
-    outfit = params.get("outfit") or os.path.splitext(os.path.basename(blend))[0] or "outfit"
+def _check_blend(blend: str) -> str | None:
+    """Return an actionable error string when ``blend`` is not a usable .blend."""
+    if not blend:
+        return "--blend was not provided"
+    if not os.path.exists(blend):
+        return f"base body not found: {blend}"
+    if not os.path.isfile(blend):
+        return f"--blend is not a file: {blend}"
 
-    result = {
+    with open(blend, "rb") as fh:
+        head = fh.read(8)
+    # Real .blend files start with the magic header, or are zstd-compressed
+    # (Blender 3.0+ "Compress" saves).
+    if head.startswith(b"BLENDER") or head.startswith(ZSTD_MAGIC):
+        return None
+    return (
+        f"{blend} is not a real .blend file (got {os.path.getsize(blend)} bytes, "
+        f"header {head!r}). It is probably still the committed placeholder stub — "
+        "export a real BASE_BODY.blend from Blender and track it with Git LFS."
+    )
+
+
+def _run_stage(stage: str, blend: str, region: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
         "status": "fail",
         "stage": stage,
         "region": region,
         "metrics": {},
         "checkpoint": None,
-        "outfit": outfit,
+        "outfit": "",
+        "error": None,
     }
 
-    # Try Blender pipeline first.
-    blender_succeeded = False
+    # Resolve the outfit name the same way the pipeline reports do.
+    outfit = params.get("outfit") or os.path.splitext(os.path.basename(blend))[0] or "outfit"
+    result["outfit"] = outfit
+
+    blend_error = _check_blend(blend)
+    if blend_error:
+        result["metrics"]["error"] = blend_error
+        result["error"] = blend_error
+        return result
+
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from bpy_scripts import pipeline  # type: ignore  # noqa: PLC0415
+        from bpy_scripts import pipeline  # noqa: PLC0415 - import after sys.path setup
+    except Exception as exc:  # pragma: no cover - depends on Blender runtime
+        detail = f"{exc.__class__.__name__}: {exc}"
+        result["metrics"]["error"] = f"failed to import bpy_scripts.pipeline: {detail}"
+        result["metrics"]["traceback"] = traceback.format_exc()
+        traceback.print_exc()  # show the real stack in the CI log
+        result["error"] = result["metrics"]["error"]
+        return result
 
-        res = pipeline.run_stage(stage, blend, region, params)
-        if res.get("status") == "pass":
-            blender_succeeded = True
-            result["status"] = "pass"
-            result["metrics"] = res.get("metrics", {})
-            result["checkpoint"] = res.get("checkpoint")
+    try:
+        if stage in FULL_RUN_ALIASES:
+            res = pipeline.run_full_pipeline(blend, region, params)
         else:
-            result["metrics"]["error"] = res.get("error", "pipeline returned fail")
-    except Exception as exc:  # never crash
-        result["metrics"]["error"] = f"{exc.__class__.__name__}: {exc}"
+            res = pipeline.run_stage(stage, blend, region, params)
+    except Exception as exc:  # pipeline bug: report it, do not swallow it
+        detail = f"{exc.__class__.__name__}: {exc}"
+        result["metrics"]["error"] = detail
+        result["metrics"]["traceback"] = traceback.format_exc()
+        traceback.print_exc()  # a pipeline bug must be visible in the CI log
+        result["error"] = detail
+        return result
 
-    # Fallback: if no .glb was produced by Blender, write a minimal one
-    # so downstream steps (e.g. web viewer) have something to load.
-    # The status is NOT changed to "pass" — a fallback means Blender failed.
-    glb_path = os.path.join("outputs", outfit, f"{outfit}_Modular.glb")
-    if not os.path.exists(glb_path):
-        try:
-            glb_path = _minimal_glb(outfit)
-        except Exception as exc:
-            result["metrics"]["glb_fallback_error"] = str(exc)
+    result["status"] = res.get("status", "fail")
+    result["metrics"] = res.get("metrics", {})
+    result["checkpoint"] = res.get("checkpoint")
+    result["outfit"] = res.get("outfit", outfit)
+    if result["status"] != "pass":
+        result["error"] = (
+            res.get("error") or result["metrics"].get("error") or "pipeline returned fail"
+        )
+    return result
 
-    if os.path.exists(glb_path):
-        result["metrics"]["glb_path"] = glb_path
-        result["metrics"]["glb_file_size_bytes"] = os.path.getsize(glb_path)
-        result["metrics"]["glb_is_fallback"] = not blender_succeeded
 
-    # Write result JSON.
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    stage = args["stage"]
+    blend = args["blend"]
+    region = args["region"]
+    out = args["out"]
+
+    try:
+        params = json.loads(args["params"])
+        if not isinstance(params, dict):
+            raise TypeError("--params must be a JSON object")
+    except Exception as exc:
+        params = {}
+        params_error = f"ignored invalid --params: {exc}"
+    else:
+        params_error = None
+
+    if stage not in STAGES:
+        result: Dict[str, Any] = {
+            "status": "fail",
+            "stage": stage,
+            "region": region,
+            "metrics": {},
+            "checkpoint": None,
+            "outfit": params.get("outfit", ""),
+            "error": f"unknown stage {stage!r}; expected one of {', '.join(STAGES)}",
+        }
+    else:
+        started = time.time()
+        result = _run_stage(stage, blend, region, params)
+        if params_error:
+            result["metrics"]["params_warning"] = params_error
+
+        outfit = result["outfit"] or params.get("outfit") or "outfit"
+        glb_path = os.path.join(REPO_ROOT, "outputs", outfit, f"{outfit}_Modular.glb")
+
+        if result["status"] == "pass" and os.path.exists(glb_path):
+            result["metrics"].update(
+                {
+                    "glb_path": str(glb_path),
+                    "glb_file_size_bytes": os.path.getsize(glb_path),
+                    "glb_is_fallback": False,
+                }
+            )
+        elif args["allow_fallback_glb"]:
+            # Explicit opt-in only: a placeholder must never pass for a build.
+            try:
+                _minimal_glb(str(glb_path))
+                result["metrics"].update(
+                    {
+                        "glb_path": str(glb_path),
+                        "glb_file_size_bytes": os.path.getsize(glb_path),
+                        "glb_is_fallback": True,
+                    }
+                )
+            except Exception as exc:
+                result["metrics"]["glb_fallback_error"] = f"{exc.__class__.__name__}: {exc}"
+        else:
+            result["metrics"]["glb_path"] = None
+            result["metrics"]["glb_is_fallback"] = False
+
+        result["metrics"].setdefault("duration_seconds", round(time.time() - started, 3))
+
+    # Write result JSON (always, even on failure) so CI can print the reason.
     out_dir = os.path.dirname(os.path.abspath(out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(out, "w") as f:
         json.dump(result, f, indent=2)
 
-    # Always exit 0 so GitHub Actions step passes.
-    sys.exit(0)
+    if result["status"] == "pass":
+        print(f"[run_pipeline] {stage}: PASS")
+        return 0
+
+    print(f"[run_pipeline] {stage}: FAIL — {result.get('error')}", file=sys.stderr)
+    print(json.dumps(result.get("metrics", {}), indent=2)[:4000], file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
-
-
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:  # last-resort guard so Blender never exits 0 on a crash
+        traceback.print_exc()
+        sys.exit(1)
