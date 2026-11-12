@@ -1,0 +1,50 @@
+name: Deploy Web Viewer
+
+# After Blender Build succeeds on main, copy the generated .glb into docs/
+# and deploy it to GitHub Pages for browser-based review (model-viewer).
+on:
+  workflow_run:
+    workflows: ["Blender Build"]
+    types:
+      - completed
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Blender build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: clothing-build
+          path: /tmp/build
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Prepare docs folder
+        run: |
+          rm -rf docs
+          mkdir -p docs/outputs/jacket_urban_01
+          cp web_viewer/index.html docs/index.html
+          cp /tmp/build/outputs/jacket_urban_01/*.glb docs/outputs/jacket_urban_01/
+          find docs -type f
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v3
