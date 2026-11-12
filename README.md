@@ -72,6 +72,9 @@ python tools/run_headless.py --variant male --outfit jacket_urban_01 --stage ful
 blender -b --python-exit-code 1 --python blender/run_pipeline.py -- \
   --stage full --variant female --out /tmp/build_female.json
 
+#    ...or preview the review page exactly as Pages serves it
+python tools/serve_viewer.py --port 8099
+
 # 3) validate the artifacts (structure + Khronos validator)
 python tools/validate_exports.py --outfit jacket_urban_01 --variant male --khronos
 
