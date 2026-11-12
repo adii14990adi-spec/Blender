@@ -57,6 +57,60 @@ body's, or raise `p99_distortion`/`max_distortion` deliberately.
 checkpoint signature: a parameter only changes the stage that consumes it, so an
 upstream checkpoint stays valid and the affected stage simply rebuilds.
 
+## Bring your own textures
+
+A material's four slots (`base_color`, `normal`, `roughness`, `metallic`) are
+ordinary file paths. When the file exists the pipeline uses it **verbatim** and
+reports `provenance: "existing"`; procedural generation only fills the slots that
+are missing. To make that strict, disable the fallback:
+
+```json
+"material": {
+  "name": "MAT_Cloth_tactical_tee_01",
+  "base_color": [0.170, 0.185, 0.100, 1.0],
+  "roughness": 0.93,
+  "textures": {
+    "base_color": "assets/textures/tactical_tee_01/base_color.png",
+    "normal":     "assets/textures/tactical_tee_01/normal.png",
+    "roughness":  "assets/textures/tactical_tee_01/roughness.png",
+    "metallic":   "assets/textures/tactical_tee_01/metallic.png"
+  },
+  "procedural": { "enabled": false }
+}
+```
+
+With `enabled: false` a missing or misnamed map **fails the build**
+(`missing texture maps for metallic and procedural generation is disabled; commit
+real textures to …`) instead of being silently generated. Both tactical separates
+ship this way; the generated ones in `assets/textures/<outfit>/` are gitignored
+(the two committed sets are re-included in `.gitignore`).
+
+### `tools/bake_textures.py`
+
+Small, dependency-free (numpy only) baker used for those committed sets:
+
+```bash
+# synthesise a tileable weave from a palette + describe the weave
+python tools/bake_textures.py --outfit tactical_tee_01 \
+  --palette 0.170,0.185,0.100 --weave twill --cells 512 \
+  --roughness 0.93 --normal-strength 0.30 --detail-resolution 512
+
+# or derive normal/roughness/metallic from a map you supply, leaving it untouched
+python tools/bake_textures.py --outfit tactical_tee_01 \
+  --from assets/textures/tactical_tee_01/base_color.png --derive-only
+```
+
+* weaves: `twill`, `plain`, `ripstop`; every field is periodic, so the maps tile.
+* `--detail-resolution` (default 512) keeps the normal/roughness/metallic maps
+  small — a 1024 normal map alone doubles the GLB.
+* `--encode linear` (default) matches the pipeline's own generator; `--encode
+  srgb` writes a standards-compliant sRGB albedo.
+* `textures.json` next to the maps records palette, weave, seed and resolution.
+
+Usable maps must clear the texture gate: `base_color` mean > 0.01 **and**
+std > 0.002, `normal` ≈ (0.5, 0.5, 1.0) with mean[2] > 0.5 and mean[0]/mean[1] >
+0.2, `roughness` not all-zero (`metallic` may be constant).
+
 ## Multi-piece outfits
 
 An outfit is either one garment (`jacket_urban_01`, `parka_urban_01`) or a
@@ -103,7 +157,7 @@ Piece fields (all optional except `region`):
 | `opening` | `front` cuts a vertical strip out of the chest (the jackets); `closed` (default) leaves the panel whole, which is what the tee uses. |
 | `offset` | Standoff ramp (`default` + `hem_extra` / `collar_extra` / `sleeve_extra`). |
 | `thickness` | Solidify thickness applied after the fit. |
-| `fit_mode` | `surface` (re-project onto the body) or `shell` (measure only — used where a leg/arm tube cannot be re-projected without collapsing). |
+| `fit_mode` | `surface` (re-project onto the body) or `shell` (measure only — used where a leg/arm tube cannot be re-projected without collapsing). Works for single-garment outfits too (`tactical_cargo_01` uses it). |
 | `fit_params` | `iterations` / `relax_iterations` overrides for `surface` pieces. |
 | `material` | One material per piece: `name`, `base_color`, `roughness`, `metallic`, `normal_strength`, `textures{base_color,normal,roughness,metallic}`, optional `procedural` settings. Texture paths default to `<texture_dir>/<piece>_<slot>.png`. |
 

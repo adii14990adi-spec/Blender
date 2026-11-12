@@ -31,6 +31,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 GARMENT_OBJECT = "CLOTH_Shell"
+# Softbox size at which the authored light energies were tuned (a full figure).
+LIGHT_REFERENCE_SIZE = 1.8
+# Compensates for keeping the softbox irradiance constant across subjects.
+PREVIEW_EXPOSURE = 0.95
 FINAL_BLEND = "04_final.blend"
 PREVIEW_NAME = "preview.png"
 
@@ -127,7 +131,12 @@ def render(  # noqa: PLR0915 - one linear scene setup, top to bottom
     scene = bpy.context.scene
 
     garment = bpy.data.objects.get(GARMENT_OBJECT)
-    subject = [garment] if garment else [o for o in bpy.data.objects if o.type == "MESH"]
+    # Frame the whole figure: one framing for every outfit keeps the catalogue
+    # comparable, and it stops a short garment from being lit several stops
+    # hotter than a full-body one (the softbox is sized from the subject).
+    subject = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    if not subject and garment is not None:
+        subject = [garment]
     if not subject:
         raise RuntimeError(f"{blend_path} has no mesh to frame")
     _apply_mannequin_material([o for o in bpy.data.objects if o.type == "MESH"])
@@ -146,8 +155,8 @@ def render(  # noqa: PLR0915 - one linear scene setup, top to bottom
     fov_v = 2 * math.atan(camera_data.sensor_height / 2 / camera_data.lens)
     fov_h = 2 * math.atan(math.tan(fov_v / 2) * (width / height))
     distance = max(
-        (extent.z * 1.30) / 2 / math.tan(fov_v / 2),
-        (extent.x * 1.34) / 2 / math.tan(fov_h / 2),
+        (extent.z * 1.16) / 2 / math.tan(fov_v / 2),
+        (extent.x * 1.18) / 2 / math.tan(fov_h / 2),
     )
     angle = math.radians(azimuth)
     camera.location = center + Vector(
@@ -165,8 +174,10 @@ def render(  # noqa: PLR0915 - one linear scene setup, top to bottom
 
     def area_light(name: str, offset, energy: float, scale: float) -> None:
         data = bpy.data.lights.new(name, type="AREA")
-        data.energy = energy
         data.size = max(extent.z * scale, 0.2)
+        # Irradiance = power / area and the softbox is sized to the subject, so
+        # scale the power with the area to keep every outfit equally exposed.
+        data.energy = energy * (max(extent.z, 0.2) / LIGHT_REFERENCE_SIZE) ** 2
         obj = bpy.data.objects.new(name, data)
         obj.location = center + Vector(offset) * extent.z
         obj.rotation_euler = (center - obj.location).to_track_quat("-Z", "Y").to_euler()
@@ -191,7 +202,7 @@ def render(  # noqa: PLR0915 - one linear scene setup, top to bottom
         scene.view_settings.look = "AgX - Medium High Contrast"
     except TypeError:  # pragma: no cover - other OCIO configs
         pass
-    scene.view_settings.exposure = 0.3
+    scene.view_settings.exposure = PREVIEW_EXPOSURE
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     bpy.ops.render.render(write_still=True)

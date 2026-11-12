@@ -231,6 +231,8 @@ _PIECE_INHERITED = (
     "offset",
     "thickness",
     "fit",
+    "fit_mode",
+    "fit_params",
 )
 
 TEXTURE_SLOTS = ("base_color", "normal", "roughness", "metallic")

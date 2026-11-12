@@ -245,7 +245,9 @@ def _apply_piece_materials(garment, plan, uv, variant, outfit: str) -> Dict[str,
             {"uv": uv, "material_slots": slots},
         )
 
-    reports: List[Dict[str, Any]] = []
+    # Build every material first, then pack, then verify: a verification that
+    # runs before packing reports packed=False for images the .blend does hold.
+    built_materials: List[Dict[str, Any]] = []
     for slot in garment.material_slots:
         material = slot.material
         if material is None:  # pragma: no cover - shell always assigns one
@@ -256,7 +258,27 @@ def _apply_piece_materials(garment, plan, uv, variant, outfit: str) -> Dict[str,
             textures = resolve_textures(f"{outfit}_{entry['key']}", spec)
         except (FileNotFoundError, ValueError) as exc:
             return _fail(f"texture resolution failed for {material.name}: {exc}", {"uv": uv})
-        built = build_material_nodes(material, textures["paths"], spec)
+        built_materials.append(
+            {
+                "material": material,
+                "entry": entry,
+                "spec": spec,
+                "textures": textures,
+                "built": build_material_nodes(material, textures["paths"], spec),
+            }
+        )
+
+    packed = pack_images()
+
+    reports: List[Dict[str, Any]] = []
+    for item in built_materials:
+        material, entry, spec, textures, built = (
+            item["material"],
+            item["entry"],
+            item["spec"],
+            item["textures"],
+            item["built"],
+        )
         check = verify_texture_set(textures["paths"], built.get("images_by_slot"))
         if not check["ok"]:
             return _fail(
@@ -283,7 +305,6 @@ def _apply_piece_materials(garment, plan, uv, variant, outfit: str) -> Dict[str,
             }
         )
 
-    packed = pack_images()
     main = reports[0]
     metrics = {
         "uv": uv,

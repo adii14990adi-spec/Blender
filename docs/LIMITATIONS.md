@@ -12,14 +12,20 @@ body variants; nothing is speculation.
   hem is a horizontal cut, and there are no darts, pleats, gathers, lapels or
   collars. A tailored look needs a real pattern (sewn panels with seam lines)
   or a sculpted garment — both outside what this pipeline generates.
-* **Three outfits, all cut from the body.** `jacket_urban_01` (hip length) and
+* **Five outfits, all cut from the body.** `jacket_urban_01` (hip length) and
   `parka_urban_01` (longer, roomier, heavier sleeve offset) are single-piece
   garments; `tactical_loadout_01` is a four-piece loadout (tee, cargo trousers,
   duty belt, boots) cut in one pass. Every outfit uses the same panel logic and
   differs only in `pieces`/`coverage`, `offsets`, `thickness` and `materials` in
   `assets/outfits/outfits.json`. Any further outfit needs its own tuning **and**
   its own clearance/distortion validation — the offsets do not generalise for
-  free.
+  free. The tactical separates (`tactical_tee_01`, `tactical_cargo_01`) are
+  single-garment outfits cut exactly like the jackets, with committed textures.
+* **Textures are baked swatches, not photos.** `tools/bake_textures.py` generates
+  a periodic weave (twill/plain/ripstop) and derives the normal/roughness maps
+  from it; it is deterministic and tiles, but it is a *procedural* fabric, not a
+  scanned one. Drop your own `base_color.png` in and run the tool with `--from
+  … --derive-only` to use real cloth.
 * **Hard details are beveled boxes, not modelled props.** Pouches, knee pads, a
   belt buckle and a holster are rounded cuboids auto-placed on the body surface
   (anchor + normal + standoff, optional `x_range` band). They read correctly at
