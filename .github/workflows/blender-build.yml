@@ -1,15 +1,21 @@
 name: Blender Build
 
-# On merge to main: full pipeline + export. Uploads outputs/** as a build artifact
-# (or pushes to your asset CDN / Unity project via Unity Cloud Build trigger).
+# On merge to main: full pipeline + export + deploy web viewer to GitHub Pages.
 on:
   push:
     branches: [main]
     paths: ["blender/**", "prompts/**", "assets/**"]
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,3 +56,23 @@ jobs:
         with:
           name: clothing-build
           path: outputs/
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Prepare docs folder
+        run: |
+          rm -rf docs
+          mkdir -p docs/outputs/jacket_urban_01
+          cp web_viewer/index.html docs/index.html
+          cp outputs/jacket_urban_01/*.glb docs/outputs/jacket_urban_01/
+          find docs -type f
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v3
