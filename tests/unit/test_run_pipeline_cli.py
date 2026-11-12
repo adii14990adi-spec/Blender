@@ -1,17 +1,16 @@
-"""CLI contract tests for ``blender/run_pipeline.py``.
+"""CLI contract for ``blender/run_pipeline.py`` (no Blender required).
 
-These run under plain pytest (no Blender) and lock in the behaviour that made
-the last CI run confusing:
+Locks in the behaviour that made the previous CI confusing:
 
-* a bad/placeholder base body fails with an actionable message and exit 1;
-* a Python-level failure exits 1 instead of 0, so CI goes red at that step;
-* a fallback GLB is only written on explicit request and is always flagged.
+* a missing/placeholder base body fails with an actionable message and exit 1;
+* ``--allow-fallback-glb`` is gone: a build must never publish a placeholder;
+* every failure path writes a JSON report *and* exits non-zero, so a green job
+  always means a real, validated build.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,137 +20,82 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "blender" / "run_pipeline.py"
 
-try:  # bpy-based stages need a real Blender runtime, these tests don't
-    import bpy  # noqa: F401
 
-    HAS_BPY = True
-except Exception:  # any import failure means "no bpy here"
-    HAS_BPY = False
-
-requires_no_bpy = pytest.mark.skipif(
-    HAS_BPY, reason="expects a Python environment without bpy (plain pytest)"
-)
-
-
-def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def _run_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {
+        **dict(__import__("os").environ),
+        "PIPELINE_OUTPUTS_ROOT": str(tmp_path / "outputs"),
+    }
     return subprocess.run(
-        [sys.executable, str(ENTRYPOINT), *args],
+        [sys.executable, str(ENTRYPOINT), "--out", str(tmp_path / "result.json"), *args],
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
         check=False,
+        env=env,
     )
 
 
-def _fake_blend(path: Path) -> Path:
-    """A file with a valid .blend magic header but no usable contents."""
-    path.write_bytes(b"BLENDER-v300" + b"\x00" * 64)
-    return path
+def _result(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "result.json").read_text())
 
 
 @pytest.mark.unit
-@requires_no_bpy
-def test_placeholder_base_body_fails_with_actionable_message(tmp_path: Path) -> None:
-    blend = tmp_path / "BASE_BODY.blend"
-    blend.write_text("# PLACEHOLDER — replace with a real Blender file\n")
-    out = tmp_path / "result.json"
+def test_missing_blend_fails_with_an_actionable_message(tmp_path: Path) -> None:
+    proc = _run_cli(tmp_path, "--stage", "validate", "--blend", str(tmp_path / "nope.blend"))
 
-    proc = _run_cli("--stage", "validate", "--blend", str(blend), "--out", str(out))
-
-    assert proc.returncode == 1, proc.stderr
-    result = json.loads(out.read_text())
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    result = _result(tmp_path)
     assert result["status"] == "fail"
-    assert "not a real .blend file" in result["error"]
-    assert "placeholder" in result["error"].lower()
+    assert "not found" in (result["error"] or "").lower()
 
 
 @pytest.mark.unit
-@requires_no_bpy
-def test_missing_base_body_fails(tmp_path: Path) -> None:
-    out = tmp_path / "result.json"
-    proc = _run_cli(
-        "--stage",
-        "validate",
-        "--blend",
-        str(tmp_path / "nope.blend"),
-        "--out",
-        str(out),
-    )
+def test_placeholder_blend_is_rejected(tmp_path: Path) -> None:
+    blend = tmp_path / "base_body_Male.blend"
+    blend.write_text("# PLACEHOLDER - replace with a real Blender file\n")
+
+    proc = _run_cli(tmp_path, "--stage", "validate", "--blend", str(blend))
 
     assert proc.returncode == 1
-    result = json.loads(out.read_text())
+    result = _result(tmp_path)
     assert result["status"] == "fail"
-    assert "base body not found" in result["error"]
+    assert "not a blender file" in result["error"].lower()
 
 
 @pytest.mark.unit
-@requires_no_bpy
-def test_pipeline_imports_and_reports_missing_bpy_instead_of_crashing(tmp_path: Path) -> None:
-    """The exact regression: import errors must not be swallowed as a fake pass."""
-    blend = _fake_blend(tmp_path / "run_pipeline_cli_test.blend")
-    out = tmp_path / "result.json"
-    outputs = REPO_ROOT / "outputs" / "run_pipeline_cli_test"
-    try:
-        proc = _run_cli("--stage", "validate", "--blend", str(blend), "--out", str(out))
-        assert proc.returncode == 1, proc.stderr
+def test_unknown_stage_exits_non_zero(tmp_path: Path) -> None:
+    proc = _run_cli(tmp_path, "--stage", "not-a-stage")
 
-        result = json.loads(out.read_text())
-        payload = json.dumps(result)
-        assert result["status"] == "fail"
-        assert "attempted relative import" not in payload
-        assert "failed to import bpy_scripts.pipeline" not in payload
-
-        # Validators ran; they report that bpy is unavailable outside Blender.
-        validators = result["metrics"]["validators"]
-        assert validators
-        assert all(v["status"] == "fail" for v in validators.values())
-    finally:
-        shutil.rmtree(outputs, ignore_errors=True)
-
-
-@pytest.mark.unit
-def test_unknown_stage_fails() -> None:
-    proc = _run_cli("--stage", "not-a-stage", "--out", "/tmp/unknown_stage.json")
     assert proc.returncode == 1
     assert "unknown stage" in proc.stderr
 
 
 @pytest.mark.unit
-def test_fallback_glb_is_opt_in_and_flagged(tmp_path: Path) -> None:
-    blend = _fake_blend(tmp_path / "fallback_test.blend")
-    out = tmp_path / "result.json"
-    outputs = REPO_ROOT / "outputs" / "fallback_test"
-    try:
-        proc = _run_cli(
-            "--stage",
-            "validate",
-            "--blend",
-            str(blend),
-            "--out",
-            str(out),
-            "--allow-fallback-glb",
-        )
-        assert proc.returncode == 1
-        metrics = json.loads(out.read_text())["metrics"]
-        assert metrics["glb_is_fallback"] is True
-        assert Path(metrics["glb_path"]).exists()
-        assert metrics["glb_file_size_bytes"] > 0
-    finally:
-        shutil.rmtree(outputs, ignore_errors=True)
+def test_fallback_glb_flag_is_rejected(tmp_path: Path) -> None:
+    """The custom placeholder GLB writer is gone; asking for it must fail loudly."""
+    proc = _run_cli(tmp_path, "--stage", "validate", "--allow-fallback-glb")
+
+    assert proc.returncode == 1
+    result = _result(tmp_path)
+    assert result["status"] == "fail"
+    assert "--allow-fallback-glb" in result["error"]
+    assert not list((tmp_path / "outputs").rglob("*.glb"))
 
 
 @pytest.mark.unit
-def test_no_fallback_glb_by_default(tmp_path: Path) -> None:
-    blend = _fake_blend(tmp_path / "no_fallback_test.blend")
-    out = tmp_path / "result.json"
-    outputs = REPO_ROOT / "outputs" / "no_fallback_test"
-    try:
-        proc = _run_cli("--stage", "validate", "--blend", str(blend), "--out", str(out))
-        assert proc.returncode == 1
-        metrics = json.loads(out.read_text())["metrics"]
-        assert metrics["glb_is_fallback"] is False
-        assert metrics["glb_path"] is None
-        # The validator report may exist, but no .glb may be written.
-        assert not list(outputs.glob("*.glb"))
-    finally:
-        shutil.rmtree(outputs, ignore_errors=True)
+def test_list_assets_reports_both_body_variants(tmp_path: Path) -> None:
+    proc = _run_cli(tmp_path, "--list-assets")
+
+    assert proc.returncode == 0, proc.stderr
+    assert "male" in proc.stdout and "female" in proc.stdout
+    assert "jacket_urban_01" in proc.stdout
+
+
+@pytest.mark.unit
+def test_no_base_body_blend_assumption_remains(tmp_path: Path) -> None:
+    """Resolution must come from the manifest, not a hard-coded BASE_BODY.blend."""
+    proc = _run_cli(tmp_path, "--list-assets", "--variant", "female")
+
+    assert proc.returncode == 0, proc.stderr
+    assert "female" in proc.stdout

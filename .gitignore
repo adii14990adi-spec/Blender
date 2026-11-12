@@ -1,6 +1,15 @@
 # Pipeline outputs (CI artifacts — uploaded as artifacts / to S3, never committed)
 outputs/
-docs/
+# Pages staging directory assembled by .github/workflows/blender-build.yml
+site/
+
+# Procedurally generated PBR texture sets (deterministic, rebuilt by the
+# `uv_material` stage). Hand-authored reference maps stay tracked.
+assets/textures/*/
+
+# Node tooling (Khronos glTF Validator is installed by CI)
+node_modules/
+npm-debug.log*
 
 # Python
 __pycache__/

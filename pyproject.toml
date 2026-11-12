@@ -1,8 +1,12 @@
 [project]
 name = "modular-clothing-pipeline"
-version = "1.0.0"
+version = "2.0.0"
 description = "Headless Blender modular clothing pipeline with Arena Agent orchestration"
 requires-python = ">=3.10"
+
+[project.optional-dependencies]
+# Blender 5.0 as an importable module (needs Python 3.11 on Linux).
+test = ["pytest>=7", "numpy>=1.24", "bpy==5.0.0; python_version == '3.11'"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -21,6 +25,22 @@ unfixable = []
 [tool.ruff.lint.isort]
 known-first-party = ["bpy_scripts"]
 
+[tool.ruff.lint.per-file-ignores]
+# ``bpy`` is imported lazily inside functions so the package stays importable
+# outside Blender (unit tests, CI tooling, the GLB/FBX inspectors).
+"blender/bpy_scripts/**" = [
+  "PLC0415",  # import-outside-top-level - deliberate lazy bpy imports
+  "PLR0915",  # too-many-statements  - procedural stage entry points
+  "PLR0912",  # too-many-branches    - procedural stage entry points
+  "PLR0911",  # too-many-returns     - fail-fast gates with one reason each
+  "PLR0913",  # too-many-arguments   - explicit stage params
+  "PLR0917",  # too-many-positional  - explicit stage params
+  "PLR2004",  # magic value comparison - mm/m thresholds in the geometry code
+]
+# Tests assert on concrete numbers on purpose; that is what makes them useful.
+"tests/**" = ["PLR2004", "PLC0415"]
+"tools/**" = ["PLR2004", "PLC0415"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
@@ -29,6 +49,7 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra"
 markers = [
     "unit",
     "integration",

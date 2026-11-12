@@ -1,28 +1,48 @@
-"""Stage 02: Shrinkwrap the cloth shell onto the base body."""
+"""Stage 01 — surface-accurate garment fitting.
+
+The old implementation moved every shell vertex towards the nearest body
+*vertex* by a fixed distance. On a 6k-vertex character that produces a garment
+that follows the body's vertex density instead of its surface: uneven offsets,
+distorted panels and visible gaps.
+
+This stage projects each vertex onto the nearest point of the body *surface*
+(BVH tree), pushes it out along the surface normal by the requested offset,
+relaxes the result with a fixed Laplacian pass to remove triangle-level noise,
+and then re-projects so that no vertex ends up inside the body. Vertices tagged
+``UN_SHRINK`` (hem, collar, cuffs) keep their shape but still cannot penetrate.
+"""
 
 from __future__ import annotations
 
 import os
 from typing import Any, Dict
 
-try:
+try:  # pragma: no cover
     import bpy
+    from mathutils import Vector
 
     _HAS_BPY = True
-except ImportError:  # pragma: no cover - allows import / lint outside Blender
+except ImportError:  # pragma: no cover
     bpy = None  # type: ignore[assignment]
+    Vector = None  # type: ignore[assignment]
     _HAS_BPY = False
 
+from ..config import ConfigError, load_outfit, resolve_variant
+from ..utils.bpy_helpers import PipelineError, find_mesh_object, mesh_stats, open_blend, save_blend
+from ..utils.frame import height_fraction, infer_landmarks
+from ..utils.geometry import Surface, count_penetrations, fit_to_surface, repair_and_solidify
 from ..utils.logging import get_logger
-from ..utils.paths import checkpoint_path, ensure_dir, input_blend_path, outfit_dir
+from ..utils.paths import checkpoint_path, ensure_dir, outfit_dir
 
 logger = get_logger("stages.shrinkwrap")
 
 STAGE_INDEX = 1
 STAGE_NAME = "shrinkwrap"
-SHELL_OBJECT_NAME = "CLOTH_Shell"
-BASE_BODY_NAME = "BASE_BODY"
-DEFAULT_OFFSET = 0.004  # CHANGELOG v1.3.0
+GARMENT_OBJECT_NAME = "CLOTH_Shell"
+UN_SHRINK_GROUP = "UN_SHRINK"
+DEFAULT_OFFSET = 0.014
+MAX_ALLOWED_DISTORTION = 3.0  # worst single edge (relative length change)
+MAX_P99_DISTORTION = 0.5  # 99th percentile of edges above 3 mm
 
 
 def _fail(error: str, metrics: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -35,63 +55,175 @@ def _fail(error: str, metrics: Dict[str, Any] | None = None) -> Dict[str, Any]:
     }
 
 
-def _pass(metrics: Dict[str, Any], checkpoint: str | None = None) -> Dict[str, Any]:
+def _edge_lengths(obj):
+    matrix = obj.matrix_world
+    return [
+        (matrix @ obj.data.vertices[a].co - matrix @ obj.data.vertices[b].co).length
+        for a, b in (edge.vertices for edge in obj.data.edges)
+    ]
+
+
+def _distortion(before, after, min_edge_length: float = 3e-3) -> Dict[str, float]:
+    """Edge-length change statistics, ignoring sub-millimetre sliver edges."""
+    ratios = [
+        abs(new / old - 1.0)
+        for old, new in zip(before, after, strict=False)
+        if old >= min_edge_length
+    ]
+    if not ratios:
+        return {"max": 0.0, "p99": 0.0, "edges_measured": 0}
+    ratios.sort()
     return {
-        "status": "pass",
-        "stage": STAGE_NAME,
-        "metrics": metrics,
-        "checkpoint": checkpoint,
+        "max": round(ratios[-1], 4),
+        "p99": round(ratios[min(len(ratios) - 1, int(0.99 * len(ratios)))], 4),
+        "edges_measured": len(ratios),
     }
 
 
-def _find(name: str):
-    for obj in bpy.data.objects:  # type: ignore[attr-defined]
-        if obj.name == name:
-            return obj
-    return None
-
-
-def shrinkwrap_to_body(
-    shell: "bpy.types.Object",
-    body: "bpy.types.Object",
-    offset: float = DEFAULT_OFFSET,
+def fit_garment(
+    garment, body, settings: Dict[str, Any], landmarks, params: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Core bpy operation: apply shrinkwrap offset via vertex displacement.
+    base_offset = float(
+        params.get("offset", (settings.get("offset") or {}).get("default", DEFAULT_OFFSET))
+    )
+    if base_offset <= 0:
+        raise PipelineError(f"offset must be > 0, got {base_offset}")
 
-    Uses bpy.data API directly (no bpy.ops modifier apply) so it works
-    reliably in headless mode where 3D view context is unavailable.
-    """
-    if shell.type != "MESH" or body.type != "MESH":
-        return {"status": "fail", "error": "shell and body must be mesh objects"}
+    iterations = int(params.get("iterations", 2))
+    relax_iterations = int(params.get("relax_iterations", 6))
+    coverage = settings.get("coverage") or {}
+    top = float(coverage.get("top", 0.19))
+    bottom = float(coverage.get("bottom", 0.58))
+    offsets = settings.get("offset") or {}
+    hem_extra = float(offsets.get("hem_extra", 0.0))
 
-    # Displace shell vertices along their normals toward the body surface,
-    # approximating a shrinkwrap offset. For each shell vertex, find the
-    # nearest body vertex and move the shell vertex toward it by `offset`.
-    shell_mesh = shell.data
-    body_mesh = body.data
-    body_matrix = body.matrix_world
-    shell_matrix = shell.matrix_world
+    def ramp(point) -> float:
+        fraction = height_fraction(point.z, landmarks)
+        span = max(bottom - top, 1e-6)
+        position = (fraction - top) / span
+        hem = max(0.0, min(1.0, (position - 0.62) / 0.38))
+        return base_offset + hem_extra * hem * hem
 
-    # Build list of body vertex world positions.
-    body_verts = [body_matrix @ v.co for v in body_mesh.vertices]
+    surface = Surface(body)
+    group = garment.vertex_groups.get(UN_SHRINK_GROUP)
+    pinned = []
+    if group is not None:
+        for vertex in garment.data.vertices:
+            for membership in vertex.groups:
+                if membership.group == group.index and membership.weight > 0.5:
+                    pinned.append(vertex.index)
 
-    displaced = 0
-    for vert in shell_mesh.vertices:
-        shell_pos = shell_matrix @ vert.co
-        # Find nearest body vertex.
-        nearest = min(body_verts, key=lambda p: (p - shell_pos).length)
-        direction = (nearest - shell_pos).normalized()
-        vert.co += direction * offset
-        displaced += 1
+    before = _edge_lengths(garment)
+    result = fit_to_surface(
+        garment,
+        surface,
+        offset=base_offset,
+        iterations=iterations,
+        relax_iterations=relax_iterations,
+        relax_factor=float(params.get("relax_factor", 0.5)),
+        keep_indices=pinned,
+        offset_ramp=ramp,
+    )
+    after = _edge_lengths(garment)
+    distortion = _distortion(before, after)
+    result["edge_distortion"] = distortion
+    result["max_edge_distortion"] = distortion["max"]
+    result["offset_requested"] = base_offset
+    # A vertex that is merely closer to the body than the requested standoff is
+    # a tight fit (armpits, crotch). A vertex at distance 0 is actual
+    # poke-through; both are reported, only the latter is a hard failure.
+    result["penetrating_vertices"] = count_penetrations(garment, surface, min_clearance=1e-4)
+    result["tight_vertices"] = count_penetrations(garment, surface, min_clearance=base_offset * 0.5)
+    result["vertices"] = len(garment.data.vertices)
+    return result
 
-    shell_mesh.update()
 
-    return {
-        "status": "pass",
-        "shrinkwrap_offset": offset,
-        "shell_vertex_count": len(shell_mesh.vertices),
-        "displaced_vertices": displaced,
+def fit_checkpoint(
+    blend_path: str, region: str, params: Dict[str, Any], outfit: str
+) -> Dict[str, Any]:
+    if not _HAS_BPY:
+        return _fail("bpy is not available: run inside Blender")
+    try:
+        variant = resolve_variant(params.get("variant"), params.get("_body_manifest"))
+        settings = load_outfit(outfit, params.get("_outfit_manifest"))
+    except ConfigError as exc:
+        return _fail(str(exc))
+
+    open_blend(blend_path)
+    garment = find_mesh_object(GARMENT_OBJECT_NAME)
+    body = find_mesh_object(params.get("body_object") or variant.body_object)
+    if garment is None:
+        return _fail(
+            f"{GARMENT_OBJECT_NAME!r} not found in {blend_path}; run the `shell` stage first",
+            {"objects": [obj.name for obj in bpy.data.objects]},
+        )
+    if body is None:
+        return _fail(f"body object {variant.body_object!r} not found in {blend_path}")
+
+    landmarks = infer_landmarks([body.matrix_world @ v.co for v in body.data.vertices])
+    try:
+        result = fit_garment(garment, body, settings, landmarks, params)
+        thickness = float(params.get("thickness", (settings.get("thickness") or 0.006)))
+        if thickness <= 0:
+            raise PipelineError("outfit thickness must be > 0")
+        shell = repair_and_solidify(garment, thickness)
+    except PipelineError as exc:
+        return _fail(str(exc))
+
+    if shell["non_manifold_edges"] or shell["boundary_edges"]:
+        return _fail(
+            "garment is not watertight after applying thickness "
+            f"({shell['non_manifold_edges']} non-manifold edges, "
+            f"{shell['boundary_edges']} boundary edges)",
+            {"fit": result, "shell": shell},
+        )
+    if shell["volume_m3"] <= 0:
+        return _fail(
+            f"garment volume {shell['volume_m3']} is not positive (inverted normals)",
+            {"shell": shell},
+        )
+
+    min_clearance = float(params.get("min_clearance", 0.0))
+    max_distortion = float(params.get("max_distortion", MAX_ALLOWED_DISTORTION))
+    p99_limit = float(params.get("p99_distortion", 0.5))
+    ok = (
+        result["min_clearance"] > min_clearance
+        and result["max_edge_distortion"] <= max_distortion
+        and result["edge_distortion"]["p99"] <= p99_limit
+    )
+
+    metrics = {
+        "fit": result,
+        "shell": shell,
+        "garment_stats": mesh_stats(garment),
+        "body_object": body.name,
+        "variant": params.get("variant"),
+        "criteria": {
+            "min_clearance": min_clearance,
+            "max_allowed_edge_distortion": max_distortion,
+            "max_allowed_p99_edge_distortion": p99_limit,
+        },
     }
+    if not ok:
+        reasons = []
+        if result["min_clearance"] <= min_clearance:
+            reasons.append(
+                f"garment penetrates the body (min clearance {result['min_clearance']:.4f} m); "
+                "raise `offset`"
+            )
+        if result["max_edge_distortion"] > max_distortion:
+            reasons.append(
+                f"edge distortion {result['max_edge_distortion']:.2f} exceeds {max_distortion:.2f} "
+                "(garment is stretched; raise `relax_iterations`)"
+            )
+        if result["edge_distortion"]["p99"] > p99_limit:
+            reasons.append(
+                f"99th percentile edge distortion {result['edge_distortion']['p99']:.2f} "
+                f"exceeds {p99_limit:.2f}"
+            )
+        metrics["reasons"] = reasons
+        return _fail("; ".join(reasons), metrics)
+    return {"status": "pass", "stage": STAGE_NAME, "metrics": metrics, "checkpoint": None}
 
 
 def run(
@@ -100,50 +232,25 @@ def run(
     params: Dict[str, Any] | None = None,
     outfit: str | None = None,
 ) -> Dict[str, Any]:
-    """Orchestrator entry point: run shrinkwrap and save a .blend checkpoint."""
-    params = params or {}
-    offset = float(params.get("offset", DEFAULT_OFFSET))
+    params = dict(params or {})
+    outfit = outfit or params.get("outfit") or os.path.splitext(os.path.basename(blend_path))[0]
+    params.setdefault("outfit", outfit)
+    variant = params.get("variant") or "male"
 
-    if not _HAS_BPY:
-        return {
-            "status": "fail",
-            "stage": STAGE_NAME,
-            "metrics": {"error": "bpy not available outside Blender"},
-            "checkpoint": None,
-        }
+    result = fit_checkpoint(blend_path, region, params, outfit)
+    if result["status"] != "pass":
+        return result
 
-    outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
-    input_path, input_info = input_blend_path(blend_path, outfit, STAGE_INDEX)
-
-    bpy.ops.wm.read_factory_settings(use_empty=True)
+    checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME, variant)
+    ensure_dir(outfit_dir(outfit, variant))
     try:
-        bpy.ops.wm.open_mainfile(filepath=input_path)
-    except Exception as exc:
-        return _fail(f"could not open {input_path}: {exc}", {"input": input_info})
+        save_blend(checkpoint)
+    except PipelineError as exc:
+        result.update({"status": "fail", "error": str(exc), "checkpoint": None})
+        result["metrics"]["error"] = str(exc)
+        return result
 
-    shell = _find(SHELL_OBJECT_NAME)
-    body = _find(BASE_BODY_NAME)
-    if shell is None:
-        return _fail("CLOTH_Shell not found — run shell stage first", {"input": input_info})
-    if body is None:
-        return _fail("BASE_BODY not found in blend", {"input": input_info})
-
-    op_result = {**shrinkwrap_to_body(shell, body, offset=offset), "input": input_info}
-
-    ensure_dir(outfit_dir(outfit))
-    checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME)
-    try:
-        bpy.ops.wm.save_as_mainfile(filepath=checkpoint)
-        return {
-            "status": "pass",
-            "stage": STAGE_NAME,
-            "metrics": op_result,
-            "checkpoint": checkpoint,
-        }
-    except Exception as exc:  # pragma: no cover - filesystem dependent
-        return {
-            "status": "fail",
-            "stage": STAGE_NAME,
-            "metrics": {**op_result, "error": f"checkpoint save failed: {exc}"},
-            "checkpoint": None,
-        }
+    result["checkpoint"] = checkpoint
+    result["metrics"]["checkpoint_bytes"] = os.path.getsize(checkpoint)
+    logger.info("fit checkpoint -> %s", checkpoint)
+    return result

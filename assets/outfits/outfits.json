@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "description": "Outfit definitions consumed by the garment stage. Coverage values are fractions of body height measured from the top of the head (0.0) to the soles (1.0), which keeps one definition valid for both body variants.",
+  "outfits": {
+    "jacket_urban_01": {
+      "display_name": "Urban Jacket 01",
+      "region": "UPPER_BODY",
+      "garment_type": "jacket",
+      "coverage": {
+        "top": 0.185,
+        "bottom": 0.585
+      },
+      "sleeves": {
+        "length": 0.74,
+        "cuff_inset": 0.98
+      },
+      "opening": "front",
+      "opening_width": 0.055,
+      "offset": {
+        "default": 0.012,
+        "hem_extra": 0.006,
+        "collar_extra": 0.002,
+        "sleeve_extra": 0.004
+      },
+      "thickness": 0.007,
+      "fit": "regular",
+      "material": {
+        "name": "MAT_Cloth_jacket_urban_01",
+        "base_color": [
+          0.16,
+          0.18,
+          0.22,
+          1.0
+        ],
+        "roughness": 0.78,
+        "metallic": 0.0,
+        "normal_strength": 1.0,
+        "textures": {
+          "base_color": "assets/textures/jacket_urban_01/basecolor.png",
+          "normal": "assets/textures/jacket_urban_01/normal.png",
+          "roughness": "assets/textures/jacket_urban_01/roughness.png",
+          "metallic": "assets/textures/jacket_urban_01/metallic.png"
+        },
+        "procedural": {
+          "enabled": true,
+          "resolution": 512,
+          "weave_cells": 48,
+          "height_amplitude": 0.35
+        }
+      },
+      "reference_images": [
+        "assets/references/jacket_urban_01/front.png",
+        "assets/references/jacket_urban_01/side.png",
+        "assets/references/jacket_urban_01/back.png"
+      ]
+    }
+  }
+}

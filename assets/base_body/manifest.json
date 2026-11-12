@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "description": "Body variants shipped with this repository. The pipeline never assumes a hard-coded BASE_BODY.blend; every variant is resolved through this manifest and validated before use.",
+  "up_axis_legend": "Axis that points from the feet towards the head in the source .blend world space.",
+  "forward_axis_legend": "Axis the character's face points towards in the source .blend world space.",
+  "default_variant": "male",
+  "variants": {
+    "male": {
+      "file": "base_body_Male.blend",
+      "body_object": "SuperHero_Male",
+      "auxiliary_objects": ["Eyes", "Eyebrows"],
+      "armature_object": null,
+      "up_axis": "-Y",
+      "forward_axis": "-Z",
+      "expected_scale_metres": 1.82,
+      "notes": "Marketplace superhero base body. Authored Y-down, face towards -Z, no armature, no vertex groups, no UVs. The pipeline normalises it to +Z up / -Y forward and builds a rig when none is supplied."
+    },
+    "female": {
+      "file": "base_body_Female.blend",
+      "body_object": "Superhero_Female",
+      "auxiliary_objects": ["Eyes", "Eyebrows"],
+      "armature_object": null,
+      "up_axis": "-Y",
+      "forward_axis": "-Z",
+      "expected_scale_metres": 1.775,
+      "notes": "Marketplace superhero base body. Same source orientation and rig-less state as the male variant."
+    }
+  }
+}
