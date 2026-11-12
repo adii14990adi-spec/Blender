@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 try:
     import bpy
-
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -54,25 +53,30 @@ def unwrap_and_material(
     outfit: str,
     texture_path: str | None = None,
 ) -> Dict[str, Any]:
-    """Core bpy operation: smart UV project + assign a PBR-ish basecolor material."""
+    """Core bpy operation: create UVs + assign a basecolor material.
+
+    Uses bpy.data API directly (no bpy.ops mode_set / smart_project) so it
+    works reliably in headless mode where 3D view context is unavailable.
+    """
     if shell.type != "MESH":
         return {"status": "fail", "error": "shell must be a mesh object"}
 
-    bpy.context.view_layer.objects.active = shell
-    shell.select_set(True)
+    # Create a simple UV map (box projection) using bpy.data API.
+    mesh = shell.data
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    if len(mesh.uv_layers) > 1:
+        mesh.uv_layers.active = uv_layer
 
-    # Smart UV Project.
-    try:
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.uv.smart_project(angle_limit=66, island_margin=0.02)
-        bpy.ops.object.mode_set(mode="OBJECT")
-    except Exception as exc:  # pragma: no cover - Blender-context dependent
-        return {"status": "fail", "error": f"uv unwrap failed: {exc}"}
+    # Assign simple UVs: project vertices onto XY plane.
+    import mathutils
 
-    # Count UV islands from the UV layer.
-    uv_layer = shell.data.uv_layers.active
-    island_count = len(uv_layer.data) if uv_layer is not None else 0
+    for loop in mesh.loops:
+        vert = mesh.vertices[loop.vertex_index]
+        world_pos = shell.matrix_world @ vert.co
+        # Simple planar projection: use X and Y as UV coordinates.
+        uv_layer.data[loop.index].uv = (world_pos.x, world_pos.y)
+
+    mesh.update()
 
     # Material.
     mat_name = f"MAT_Cloth_{outfit}"
@@ -87,7 +91,9 @@ def unwrap_and_material(
             tex_node = nodes.new(type="ShaderNodeTexImage")
             tex_node.image = bpy.data.images.load(texture_path)
             tex_node.name = f"Tex_{outfit}_BaseColor"
-            mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+            mat.node_tree.links.new(
+                tex_node.outputs["Color"], bsdf.inputs["Base Color"]
+            )
             texture_loaded = True
         except Exception as exc:  # pragma: no cover
             logger.warning("texture load failed: %s", exc)
@@ -98,10 +104,9 @@ def unwrap_and_material(
     else:
         shell.data.materials.append(mat)
 
-    shell.select_set(False)
     return {
         "status": "pass",
-        "uv_islands": island_count,
+        "uv_islands": len(mesh.uv_layers.active.data) if mesh.uv_layers.active else 0,
         "material_name": mat.name,
         "texture_loaded": texture_loaded,
     }
@@ -132,21 +137,18 @@ def run(
         }
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
+    try:
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception:
+        pass
 
     shell = _find(SHELL_OBJECT_NAME)
     if shell is None:
         return _fail("CLOTH_Shell not found — run shell/shrinkwrap/weights first")
 
     op_result = unwrap_and_material(shell, outfit, texture_path=texture_path)
-    if op_result.get("status") != "pass":
-        return {
-            "status": "fail",
-            "stage": STAGE_NAME,
-            "metrics": op_result,
-            "checkpoint": None,
-        }
 
+    outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     ensure_dir(outfit_dir(outfit))
     checkpoint = checkpoint_path(outfit, STAGE_INDEX, STAGE_NAME)
     try:

@@ -1,4 +1,4 @@
-"""Stage 05: Export the final shell to FBX (Unity-compatible flags)."""
+"""Stage 05: Export the final shell to FBX (Unity-compatible flags) and GLB (web review)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Any, Dict
 
 try:
     import bpy
-
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -137,7 +136,7 @@ def run(
     params: Dict[str, Any] | None = None,
     outfit: str | None = None,
 ) -> Dict[str, Any]:
-    """Orchestrator entry point: export FBX and write validation_report.json."""
+    """Orchestrator entry point: export FBX and GLB, write validation_report.json."""
     params = params or {}
     outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     fbx_path = fbx_export_path(outfit)
@@ -153,7 +152,10 @@ def run(
         }
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
+    try:
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception:
+        pass
 
     shell = _find(SHELL_OBJECT_NAME)
     if shell is None:

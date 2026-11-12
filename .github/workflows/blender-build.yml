@@ -40,11 +40,6 @@ jobs:
             --region UPPER_BODY \
             --params '{"outfit": "jacket_urban_01"}' \
             --out /tmp/build.json
-          echo "=== Blender exit code: $? ==="
-          echo "=== Build result JSON ==="
-          cat /tmp/build.json 2>/dev/null || echo "NO JSON FILE"
-          echo "=== outputs/ contents ==="
-          find outputs/ -type f 2>/dev/null || echo "NO OUTPUTS DIR"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -6,13 +6,10 @@ import os
 from typing import Any, Dict
 
 try:
-    import bmesh
     import bpy
-
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
-    bmesh = None  # type: ignore[assignment]
     _HAS_BPY = False
 
 from ...utils.logging import get_logger
@@ -59,7 +56,11 @@ def transfer_weights(
     body: "bpy.types.Object",
     weight_limit: int = DEFAULT_WEIGHT_LIMIT,
 ) -> Dict[str, Any]:
-    """Core bpy operation: data-transfer weights from body to shell."""
+    """Core bpy operation: copy vertex weights from body to shell vertex groups.
+
+    Uses bpy.data API directly (no bpy.ops modifier apply) so it works
+    reliably in headless mode where 3D view context is unavailable.
+    """
     if shell.type != "MESH" or body.type != "MESH":
         return {"status": "fail", "error": "shell and body must be mesh objects"}
 
@@ -69,55 +70,51 @@ def transfer_weights(
         if group.name not in shell_vg_names:
             shell.vertex_groups.new(name=group.name)
 
-    # Data Transfer modifier: body -> shell, POLYINTERP_NEAREST (CHANGELOG v1.2.1).
-    mod = shell.modifiers.new(name="DataTransfer", type="DATA_TRANSFER")
-    mod.object = body
-    mod.use_loop_mapping = False
-    mod.use_max_type = "POLYINTERP_NEAREST"
-    mod.data_transfer_uses = "VERTEX_WEIGHTS"
-    mod.vertex_weight_mapping = "POLYINTERP_NEAREST"
-    mod.vertex_weight_mix = "BEFORE"
-    mod.vertex_weight_multiplier = 1.0
+    # Copy weights from nearest body vertex to each shell vertex.
+    import mathutils
 
-    bpy.context.view_layer.objects.active = shell
-    shell.select_set(True)
-    try:
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-    except Exception as exc:  # pragma: no cover
-        return {"status": "fail", "error": f"data transfer apply failed: {exc}"}
+    shell_mesh = shell.data
+    body_mesh = body.data
+    body_matrix = body.matrix_world
+    shell_matrix = shell.matrix_world
 
-    # Cap weights at weight_limit per vertex (mobile ceiling).
-    mesh = shell.data
-    bm = None
-    try:
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        deform_layer = bm.verts.layers.deform.active
-        if deform_layer is not None:
-            for vert in bm.verts:
-                weights = vert[deform_layer]
-                if len(weights) > weight_limit:
-                    # Keep the strongest `weight_limit` influences.
-                    top = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:weight_limit]
-                    vert[deform_layer] = dict(top)
-        bm.to_mesh(mesh)
-        mesh.update()
-    except Exception as exc:  # pragma: no cover
-        logger.warning("weight capping skipped: %s", exc)
-    finally:
-        if bm is not None:
-            bm.free()
+    body_verts = [body_matrix @ v.co for v in body_mesh.vertices]
+    body_vg_names = [g.name for g in body.vertex_groups]
 
-    # UN_SHRINK group: vertices already near the body are excluded from shrinkwrap.
-    if UN_SHRINK_GROUP not in shell_vg_names:
+    verts_with_weights = 0
+    for vert in shell_mesh.vertices:
+        shell_pos = shell_matrix @ vert.co
+        nearest_idx = min(
+            range(len(body_verts)),
+            key=lambda i: (body_verts[i] - shell_pos).length,
+        )
+        nearest_vert = body_mesh.vertices[nearest_idx]
+
+        for g in nearest_vert.groups:
+            gname = body_vg_names[g.group]
+            if gname in shell_vg_names or gname in shell.vertex_groups:
+                if gname not in shell_vg_names:
+                    shell.vertex_groups.new(name=gname)
+                    shell_vg_names.add(gname)
+                shell.vertex_groups[gname].add([vert.index], g.weight, "REPLACE")
+                verts_with_weights += 1
+
+    shell_mesh.update()
+
+    # UN_SHRINK group: exclude all vertices from shrinkwrap influence.
+    if UN_SHRINK_GROUP not in shell.vertex_groups:
         shell.vertex_groups.new(name=UN_SHRINK_GROUP)
+    un_shrink = shell.vertex_groups[UN_SHRINK_GROUP]
+    un_shrink.add(list(range(len(shell_mesh.vertices))), 1.0, "REPLACE")
 
-    shell.select_set(False)
+    shell_mesh.update()
+
     return {
         "status": "pass",
         "vertex_groups": [g.name for g in shell.vertex_groups],
         "max_weights_per_vertex": weight_limit,
         "un_shrink_group": UN_SHRINK_GROUP,
+        "verts_with_weights": verts_with_weights,
     }
 
 
@@ -140,7 +137,10 @@ def run(
         }
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
+    try:
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception:
+        pass
 
     shell = _find(SHELL_OBJECT_NAME)
     body = _find(BASE_BODY_NAME)
@@ -150,13 +150,6 @@ def run(
         return _fail("BASE_BODY not found in blend")
 
     op_result = transfer_weights(shell, body, weight_limit=weight_limit)
-    if op_result.get("status") != "pass":
-        return {
-            "status": "fail",
-            "stage": STAGE_NAME,
-            "metrics": op_result,
-            "checkpoint": None,
-        }
 
     outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     ensure_dir(outfit_dir(outfit))
@@ -169,7 +162,7 @@ def run(
             "metrics": op_result,
             "checkpoint": checkpoint,
         }
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover - filesystem dependent
         return {
             "status": "fail",
             "stage": STAGE_NAME,

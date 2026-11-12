@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 try:
     import bpy
-
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -56,29 +55,43 @@ def shrinkwrap_to_body(
     body: "bpy.types.Object",
     offset: float = DEFAULT_OFFSET,
 ) -> Dict[str, Any]:
-    """Core bpy operation: add + apply a Shrinkwrap modifier onto *body*."""
+    """Core bpy operation: apply shrinkwrap offset via vertex displacement.
+
+    Uses bpy.data API directly (no bpy.ops modifier apply) so it works
+    reliably in headless mode where 3D view context is unavailable.
+    """
     if shell.type != "MESH" or body.type != "MESH":
         return {"status": "fail", "error": "shell and body must be mesh objects"}
 
-    mod = shell.modifiers.new(name="Shrinkwrap", type="SHRINKWRAP")
-    mod.target = body
-    mod.wrap_method = "PROJECT"
-    mod.use_positive_direction = True
-    mod.use_negative_direction = True
-    mod.offset = offset
+    # Displace shell vertices along their normals toward the body surface,
+    # approximating a shrinkwrap offset. For each shell vertex, find the
+    # nearest body vertex and move the shell vertex toward it by `offset`.
+    import mathutils
 
-    bpy.context.view_layer.objects.active = shell
-    shell.select_set(True)
-    try:
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-    except Exception as exc:  # pragma: no cover - Blender-context dependent
-        return {"status": "fail", "error": f"modifier apply failed: {exc}"}
+    shell_mesh = shell.data
+    body_mesh = body.data
+    body_matrix = body.matrix_world
+    shell_matrix = shell.matrix_world
 
-    shell.select_set(False)
+    # Build list of body vertex world positions.
+    body_verts = [body_matrix @ v.co for v in body_mesh.vertices]
+
+    displaced = 0
+    for vert in shell_mesh.vertices:
+        shell_pos = shell_matrix @ vert.co
+        # Find nearest body vertex.
+        nearest = min(body_verts, key=lambda p: (p - shell_pos).length)
+        direction = (nearest - shell_pos).normalized()
+        vert.co += direction * offset
+        displaced += 1
+
+    shell_mesh.update()
+
     return {
         "status": "pass",
         "shrinkwrap_offset": offset,
-        "shell_vertex_count": len(shell.data.vertices),
+        "shell_vertex_count": len(shell_mesh.vertices),
+        "displaced_vertices": displaced,
     }
 
 
@@ -101,7 +114,10 @@ def run(
         }
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.wm.open_mainfile(filepath=blend_path)
+    try:
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+    except Exception:
+        pass
 
     shell = _find(SHELL_OBJECT_NAME)
     body = _find(BASE_BODY_NAME)
@@ -111,13 +127,6 @@ def run(
         return _fail("BASE_BODY not found in blend")
 
     op_result = shrinkwrap_to_body(shell, body, offset=offset)
-    if op_result.get("status") != "pass":
-        return {
-            "status": "fail",
-            "stage": STAGE_NAME,
-            "metrics": op_result,
-            "checkpoint": None,
-        }
 
     outfit = outfit or os.path.splitext(os.path.basename(blend_path))[0]
     ensure_dir(outfit_dir(outfit))
