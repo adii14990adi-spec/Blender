@@ -37,9 +37,14 @@ jobs:
 
       - name: Assert build passed
         run: |
+          echo "=== Build JSON content ==="
+          cat /tmp/build.json 2>/dev/null || echo "FILE NOT FOUND"
+          echo ""
+          echo "=== Assertion ==="
           python -c "
           import json
           r = json.load(open('/tmp/build.json'))
+          print('RESULT:', json.dumps(r, indent=2))
           assert r['status'] == 'pass', r
           print('BUILD PASS:', r['metrics'])
           "
