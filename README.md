@@ -36,8 +36,14 @@ make build OUTFIT=jacket_urban_01
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `.github/workflows/blender-validate.yml` | `pull_request` | PR gate — runs validators only, blocks bad exports |
-| `.github/workflows/blender-build.yml` | `push` to `main` | Full pipeline + FBX export, uploads `outputs/` artifact |
-| `.github/workflows/nightly-regression.yml` | nightly | Rebuild every outfit vs. the base rig, diff against `main` |
+| `.github/workflows/blender-build.yml` | `push` to `main` | Full pipeline + FBX/GLB export, uploads `outputs/` artifact |
+| `.github/workflows/deploy-web-viewer.yml` | `workflow_run` on Blender Build success | Copies `.glb` + viewer to `docs/`, deploys to GitHub Pages |
+
+### GitHub Pages (one-time setup)
+
+Enable Pages in **Settings → Pages → Build and deployment → Source: GitHub Actions**. Once enabled, every successful `main` build publishes the browser review page at `https://ii14990adi-spec.github.io/Blender/`.
+
+Without Pages enabled, `deploy-web-viewer.yml` will skip (no publish target).
 
 ## Prompt versioning
 
