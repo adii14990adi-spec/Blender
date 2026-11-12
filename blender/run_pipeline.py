@@ -77,10 +77,9 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        params = json.loads(args.params)
-    except json.JSONDecodeError as exc:
-        print(f"Invalid --params JSON: {exc}", file=sys.stderr)
-        sys.exit(2)
+        params = json.loads(args.params) if args.params else {}
+    except (json.JSONDecodeError, TypeError):
+        params = {}
 
     outfit = params.get("outfit") or os.path.splitext(os.path.basename(args.blend))[0]
     fbx_path = f"outputs/{outfit}/{outfit}_Modular.fbx"
