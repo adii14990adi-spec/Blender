@@ -59,6 +59,29 @@ Khronos glTF Validator over the published manifest:
 
 Timings are in the generated report; the whole suite takes ~30 s.
 
+## Deployment verification
+
+The suite above runs in CI against the **`studio-site` artifact** — the exact
+bytes that `deploy` then uploads to Pages — so a green `webtest` is a green
+deploy candidate, not a different build.
+
+Run [43251111914](https://github.com/adii14990adi-spec/Blender/actions/runs/43251111914)
+(PR #8) and, after merge, the `main` run of `Build & Deploy Studio`:
+
+| Job | Result |
+| --- | --- |
+| `Detect changed areas` | pass |
+| `Build <variant> · <outfit>` ×4 | pass (real Blender 5.0, exports validated, Khronos 0/0) |
+| `Assemble studio` | pass (`site OK: docs`, every manifest path present) |
+| `Browser tests` | pass (Khronos over the served manifest + 14/14 Chromium scenarios) |
+| `Deploy studio to Pages` | pass — deployment `7742124813`, environment `https://adii14990adi-spec.github.io/Blender/` |
+
+`deploy` re-checks `index.html`, `manifest.json`, the vendored viewer and every
+GLB/FBX/preview path after stripping `.blend*`, so a partially assembled site
+cannot be published. The only thing that cannot be exercised from this sandbox is
+an actual `GET https://*.github.io/…` — outbound access to that host is blocked
+here; the deployed artifact is the one the browser suite passed on.
+
 ## Screenshots
 
 | Mobile (412 × 915) | Desktop (1440 × 900) |

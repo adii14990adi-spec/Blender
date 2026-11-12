@@ -7,6 +7,9 @@ Pages.
 
 ![Mobile studio](screenshots/mobile-outfits.png)
 
+Live: <https://adii14990adi-spec.github.io/Blender/> (published by
+`Build & Deploy Studio` on every push to `main`).
+
 ## What it does
 
 | Area | Behaviour |
@@ -115,10 +118,11 @@ server — `model-viewer` cannot fetch a GLB over `file://`.
 
 `.github/workflows/blender-build.yml` publishes the studio:
 
-1. **changes** — classifies the push. `web_viewer/**`, `docs/**`,
-   `tests/fixtures/**` and workflow files are frontend-only: the Blender matrix
-   is skipped and the last validated exports are restored from the Actions cache
-   (key `assets-v1-*`).
+1. **changes** — classifies a push to `main`. `web_viewer/**`, `docs/**`,
+   `tests/fixtures/**`, `README.md` and workflow files are frontend-only: the
+   Blender matrix is skipped and the last validated exports are restored from the
+   Actions cache (key `assets-v1-*`). Pull requests always run the full matrix —
+   a PR is the gate for the pipeline, not just for the page.
 2. **build** — matrix of `<male|female> × <jacket_urban_01|parka_urban_01>`:
    run the pipeline with real Blender 5.0, validate GLB/FBX (project inspectors +
    Khronos), render the thumbnail, upload the shippable files.
