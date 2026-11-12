@@ -8,13 +8,21 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    # Pin the Blender image — never :latest (bpy API drift silently breaks the pipeline).
-    container:
-      image: ghcr.io/${{ github.repository_owner }}/blender5-headless:5.0.0
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
+
+      - name: Install headless Blender 5.0.0
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              wget xvfb python3-pip libgl1 libxi6 libxrender1
+          wget -q https://download.blender.org/release/Blender5.0/blender-5.0.0-linux-x64.tar.xz
+          sudo tar -xf blender-5.0.0-linux-x64.tar.xz -C /opt
+          sudo ln -sf /opt/blender-5.0.0-linux-x64/blender /usr/local/bin/blender
+          rm -f blender-5.0.0-linux-x64.tar.xz
+          blender --version
 
       - name: Run pipeline in validate (dry-run) mode
         run: |
