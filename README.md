@@ -147,8 +147,8 @@ skips itself green.
 
 ### GitHub Pages
 
-Enable **Settings → Pages → Source: GitHub Actions**. The studio
-(`https://<user>.github.io/<repo>/`) is the assembled site: relative asset paths
+Enable **Settings → Pages → Source: GitHub Actions**. The studio is the assembled
+site at <https://adii14990adi-spec.github.io/Blender/> — relative asset paths
 throughout, so it works from a project subpath. It ships
 
 - a male/female character switch that swaps GLBs without a reload,

@@ -7,6 +7,9 @@ Pages.
 
 ![Mobile studio](screenshots/mobile-outfits.png)
 
+Live: <https://adii14990adi-spec.github.io/Blender/> (published by
+`Build & Deploy Studio` on every push to `main`).
+
 ## What it does
 
 | Area | Behaviour |
