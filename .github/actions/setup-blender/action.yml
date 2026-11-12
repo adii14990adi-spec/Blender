@@ -38,7 +38,12 @@ runs:
         wget -q --tries=3 --timeout=60 -O "${TARBALL}" "${BASE}/${TARBALL}"
 
         if wget -q --tries=2 --timeout=30 -O blender.sha256 "${BASE}/blender-${BLENDER_VERSION}.sha256"; then
-          EXPECTED="$(grep -oE '[0-9a-f]{64}' blender.sha256 | head -1 || true)"
+          # The published .sha256 lists every artifact of the release, so pick
+          # the line that names our tarball instead of the first hash on file.
+          EXPECTED="$(grep -F "${TARBALL}" blender.sha256 | grep -oE '[0-9a-f]{64}' | head -1 || true)"
+          if [ -z "${EXPECTED}" ]; then
+            EXPECTED="$(grep -oE '[0-9a-f]{64}' blender.sha256 | head -1 || true)"
+          fi
           if [ -n "${EXPECTED}" ]; then
             ACTUAL="$(sha256sum "${TARBALL}" | cut -d' ' -f1)"
             if [ "${ACTUAL}" != "${EXPECTED}" ]; then
