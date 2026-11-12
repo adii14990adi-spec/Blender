@@ -68,6 +68,11 @@ jobs:
           set -euo pipefail
           backend=true
           reason="manual or unknown change - rebuilding assets"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # A PR is the gate for the pipeline itself, so it always builds both
+            # characters and both outfits. Frontend-only *pushes* reuse the cache.
+            reason="pull request - full pipeline gate"
+          fi
           if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.event.before }}" ] \
              && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
             if git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then

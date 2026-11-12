@@ -140,7 +140,7 @@ rejected explicitly. A build that cannot produce a valid asset fails.
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci.yml` | PR, push to `main`, manual | `lint` (ruff check + format) · `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
-| `blender-build.yml` | push to `main`, PR, manual | `changes` (skips Blender for frontend-only pushes and reuses cached exports) · `build` (matrix: 2 characters × 2 outfits, real Blender 5.0, validated exports + Khronos, rendered thumbnails) · `site` (assembles `docs/`, generates and path-validates `manifest.json`) · `webtest` (Chromium suite) · `deploy` (GitHub Pages, `main` only) |
+| `blender-build.yml` | push to `main`, PR, manual | `changes` (frontend-only pushes skip Blender and reuse cached exports; PRs always run the full matrix) · `build` (matrix: 2 characters × 2 outfits, real Blender 5.0, validated exports + Khronos, rendered thumbnails) · `site` (assembles `docs/`, generates and path-validates `manifest.json`) · `webtest` (Chromium suite) · `deploy` (GitHub Pages, `main` only) |
 
 The PR gate fails when a base body is missing or a Git-LFS pointer — it never
 skips itself green.
