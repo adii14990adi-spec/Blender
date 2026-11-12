@@ -1,0 +1,24 @@
+# Blender 5.x headless image for the modular clothing pipeline.
+# Pin the Blender version — never :latest in production workflows (bpy API drift).
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV BLENDER_VERSION=5.0.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        wget xvfb python3-pip libgl1 libxi6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install Blender 5.0.0
+RUN wget -q https://download.blender.org/release/Blender5.0/blender-5.0.0-linux-x64.tar.xz \
+    && tar -xf blender-5.0.0-linux-x64.tar.xz -C /opt \
+    && ln -s /opt/blender-5.0.0-linux-x64/blender /usr/local/bin/blender \
+    && rm blender-5.0.0-linux-x64.tar.xz
+
+# Python test/deps used by the pipeline and unit tests
+RUN pip install --no-cache-dir pytest pyyaml
+
+WORKDIR /workspace
+
+ENTRYPOINT ["blender", "-b"]

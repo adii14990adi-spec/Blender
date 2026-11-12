@@ -1,0 +1,19 @@
+agent:
+  system_prompt: prompts/system_prompt.md
+  master_prompt: prompts/master_prompt.md
+  prompt_version: "1.3.0"   # must match prompts/CHANGELOG.md
+  tools:
+    - run_stage
+    - read_validation_report
+  memory:
+    type: vector
+    persist_failures: true    # agent learns from prior failed offsets
+  stage_registry:
+    shell: blender/bpy_scripts/stages/shell.py
+    subdivide: blender/bpy_scripts/stages/shell.py
+    shrinkwrap: blender/bpy_scripts/stages/shrinkwrap.py
+    weights: blender/bpy_scripts/stages/weights.py
+    uv: blender/bpy_scripts/stages/uv_material.py
+    material: blender/bpy_scripts/stages/uv_material.py
+    validate: blender/bpy_scripts/pipeline.py
+    export: blender/bpy_scripts/stages/export_fbx.py

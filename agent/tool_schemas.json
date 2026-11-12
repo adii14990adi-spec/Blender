@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Arena Agent tool schemas for the modular clothing pipeline",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "run_stage",
+      "description": "Execute one pipeline stage in headless Blender and return validation metrics.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string",
+            "enum": ["shell", "subdivide", "shrinkwrap", "weights", "uv", "material", "validate", "export"],
+            "description": "Pipeline stage to execute."
+          },
+          "region": {
+            "type": "string",
+            "enum": ["UPPER_BODY", "LOWER_BODY", "HEAD"],
+            "description": "Body region the outfit targets."
+          },
+          "params": {
+            "type": "object",
+            "description": "Stage-specific parameters (e.g. shrinkwrap offset, weight limit)."
+          }
+        },
+        "required": ["stage"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_validation_report",
+      "description": "Read the latest validation_report.json for an outfit and return its status and metrics.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "outfit": {
+            "type": "string",
+            "description": "Outfit directory name under outputs/ (e.g. jacket_urban_01)."
+          }
+        },
+        "required": ["outfit"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

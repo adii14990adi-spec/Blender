@@ -1,0 +1,4 @@
+# PLACEHOLDER — replace with a real FBX of the base body tracked by Git LFS.
+#
+# Used by CI for cross-app exchange (Unity / DCC). Replace this stub with the
+# exported BASE_BODY.fbx and run `git lfs track "*.fbx"`.

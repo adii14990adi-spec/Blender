@@ -1,0 +1,41 @@
+name: Blender Build
+
+# On merge to main: full pipeline + export. Uploads outputs/** as a build artifact
+# (or pushes to your asset CDN / Unity project via Unity Cloud Build trigger).
+on:
+  push:
+    branches: [main]
+    paths: ["blender/**", "prompts/**", "assets/**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/blender5-headless:5.0.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Run full pipeline and export FBX
+        run: |
+          blender -b --python blender/run_pipeline.py -- \
+            --stage export \
+            --blend assets/base_body/BASE_BODY.blend \
+            --region UPPER_BODY \
+            --params '{"outfit": "jacket_urban_01"}' \
+            --out /tmp/build.json
+
+      - name: Assert build passed
+        run: |
+          python -c "
+          import json
+          r = json.load(open('/tmp/build.json'))
+          assert r['status'] == 'pass', r
+          print('BUILD PASS:', r['metrics'])
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clothing-build
+          path: outputs/
