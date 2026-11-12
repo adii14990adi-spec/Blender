@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 try:
     import bpy
+
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -71,8 +72,6 @@ def transfer_weights(
             shell.vertex_groups.new(name=group.name)
 
     # Copy weights from nearest body vertex to each shell vertex.
-    import mathutils
-
     shell_mesh = shell.data
     body_mesh = body.data
     body_matrix = body.matrix_world

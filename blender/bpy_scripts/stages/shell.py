@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 try:
     import bpy
+
     _HAS_BPY = True
 except ImportError:  # pragma: no cover - allows import / lint outside Blender
     bpy = None  # type: ignore[assignment]
@@ -77,12 +78,31 @@ def generate_shell(blend_path: str, region: str, params: Dict[str, Any]) -> Dict
         # Create a base body mesh directly using bpy.data API.
         mesh = bpy.data.meshes.new("BASE_BODY_Mesh")
         mesh.from_pydata(
-            [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
-             (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)],
-            [(0, 1), (1, 2), (2, 3), (3, 0),
-             (4, 5), (5, 6), (6, 7), (7, 4),
-             (0, 4), (1, 5), (2, 6), (3, 7)],
-            []
+            [
+                (-1, -1, -1),
+                (1, -1, -1),
+                (1, 1, -1),
+                (-1, 1, -1),
+                (-1, -1, 1),
+                (1, -1, 1),
+                (1, 1, 1),
+                (-1, 1, 1),
+            ],
+            [
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 4),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
+            ],
+            [],
         )
         mesh.update()
         body = bpy.data.objects.new(BASE_BODY_NAME, mesh)
