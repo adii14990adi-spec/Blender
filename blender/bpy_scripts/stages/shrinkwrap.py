@@ -201,6 +201,7 @@ def fit_checkpoint(
         "criteria": {
             "min_clearance": min_clearance,
             "max_allowed_edge_distortion": max_distortion,
+            "max_allowed_p99_edge_distortion": p99_limit,
         },
     }
     if not ok:

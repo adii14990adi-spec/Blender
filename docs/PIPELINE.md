@@ -24,6 +24,39 @@ re-applied the material.
 Every input is validated (file magic, object names, axes, ranges) before a stage
 runs; a bad input fails with a message naming the file, the object and the fix.
 
+## Bring your own garment
+
+Every stage takes a `--params` JSON object, and `shell` honours two keys that let
+you skip the body-surface cut entirely:
+
+```bash
+python tools/run_headless.py --variant male --outfit jacket_urban_01 --stage shell \
+  --params '{"garment_blend": "/abs/path/my_jacket.blend", "garment_object": "Jacket_Mesh"}'
+```
+
+* `garment_blend` — a `.blend` whose largest mesh becomes the garment. The object
+  is renamed `CLOTH_Shell`, so the rest of the pipeline (fit, skinning, thickness,
+  UVs, export) runs unchanged.
+* `garment_object` — optional object name; omit it to take the largest mesh.
+* `fit_supplied: false` keeps the mesh exactly where it is instead of projecting
+  it onto the body surface.
+
+A supplied mesh is rejected with the offending file and the list of available
+objects when the file is missing, holds no mesh, has fewer than 8 vertices or is
+still parented/linked to the body.
+
+The supplied mesh goes through every later stage unchanged: fit, skinning,
+thickness, UVs, export. It must be dense enough to absorb the fit — a 576-face
+grid stretched over the body trips the p99 edge-distortion gate (0.62 > 0.50),
+which is the gate doing its job. Give the stage a mesh with a density close to the
+body's, or raise `p99_distortion`/`max_distortion` deliberately.
+
+`--params` carries stage-local overrides for any stage, for example
+`{"min_clearance": 0.005}` (validate), `{"weight_limit": 4}` (weights) or
+`{"thickness": 0.002}` (shrinkwrap). They are intentionally *not* part of the
+checkpoint signature: a parameter only changes the stage that consumes it, so an
+upstream checkpoint stays valid and the affected stage simply rebuilds.
+
 ## Stage 0 — `shell`
 
 Cuts a garment panel out of the body itself, then offsets it off the surface.

@@ -78,6 +78,10 @@ python tools/serve_viewer.py --port 8099
 # 3) validate the artifacts (structure + Khronos validator)
 python tools/validate_exports.py --outfit jacket_urban_01 --variant male --khronos
 
+#    ...or build from your own garment mesh (see docs/PIPELINE.md)
+python tools/run_headless.py --variant male --outfit jacket_urban_01 --stage full \
+  --params '{"garment_blend": "/abs/path/my_jacket.blend"}'
+
 # 4) build report
 python tools/build_report.py --run male=/tmp/build.json --out docs/BUILD_REPORT.md
 
