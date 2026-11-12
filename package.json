@@ -4,9 +4,11 @@
   "version": "2.0.0",
   "description": "Validation tooling for the headless Blender clothing pipeline",
   "scripts": {
-    "validate:gltf": "node tools/gltf_validate.js"
+    "validate:gltf": "node tools/gltf_validate.js",
+    "test:browser": "node tools/browser_test.mjs"
   },
   "devDependencies": {
-    "gltf-validator": "2.0.0-dev.3.10"
+    "gltf-validator": "2.0.0-dev.3.10",
+    "puppeteer-core": "^24.10.0"
   }
 }

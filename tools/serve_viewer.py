@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Serve the asset review page the same way GitHub Pages will.
+"""Serve the assembled web viewer locally, exactly as GitHub Pages serves it.
 
-The viewer loads ``./outputs/<variant>/<outfit>/<outfit>_Modular.glb`` relative
-to itself, which is how ``blender-build.yml`` assembles the published site
-(``site/index.html`` next to ``site/outputs/...``). Serving the repository root
-does not reproduce that layout, so this tool builds it in ``site/`` and serves
-it:
+This is the same layout the deploy job publishes (``docs/``), including the
+``outputs/<variant>/<outfit>/…`` asset tree and the generated ``manifest.json``,
+so a local preview reproduces the deployed site - relative paths, MIME types and
+all.
 
-    python tools/serve_viewer.py --port 8099
+    python tools/serve_viewer.py                 # build + serve on :8099
+    python tools/serve_viewer.py --no-build      # serve an existing docs/
+    python tools/serve_viewer.py --out site      # different staging directory
 """
 
 from __future__ import annotations
@@ -16,76 +17,103 @@ import argparse
 import functools
 import http.server
 import os
-import shutil
+import socketserver
 import sys
+from typing import ClassVar, Dict, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SITE = os.path.join(REPO_ROOT, "site")
-VIEWER = os.path.join(REPO_ROOT, "web_viewer", "index.html")
-OUTPUTS = os.path.join(REPO_ROOT, "outputs")
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from tools import build_site  # noqa: E402  (path bootstrap above)
+
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".glb": "model/gltf-binary",
+    ".gltf": "model/gltf+json",
+    ".fbx": "application/octet-stream",
+    ".bin": "application/octet-stream",
+    ".md": "text/markdown; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".txt": "text/plain; charset=utf-8",
+}
 
 
-def build_site(outfit: str = "jacket_urban_01") -> list[str]:
-    if os.path.isdir(SITE):
-        shutil.rmtree(SITE)
-    os.makedirs(SITE, exist_ok=True)
-    shutil.copyfile(VIEWER, os.path.join(SITE, "index.html"))
+class StudioHandler(http.server.SimpleHTTPRequestHandler):
+    """Static handler with the MIME types and caching rules Pages uses."""
 
-    copied: list[str] = []
-    if not os.path.isdir(OUTPUTS):
-        return copied
-    for variant in sorted(os.listdir(OUTPUTS)):
-        variant_dir = os.path.join(OUTPUTS, variant)
-        if not os.path.isdir(variant_dir):
-            continue
-        # Support both layouts: outputs/<variant>/<outfit>/ and outputs/<outfit>/.
-        candidates = (
-            [os.path.join(variant_dir, outfit)]
-            if os.path.isdir(os.path.join(variant_dir, outfit))
-            else [variant_dir]
-        )
-        for source in candidates:
-            destination = os.path.join(SITE, "outputs", variant, outfit)
-            os.makedirs(destination, exist_ok=True)
-            for name in sorted(os.listdir(source)):
-                if not (name.endswith(".glb") or name.endswith(".json")):
-                    continue
-                shutil.copyfile(os.path.join(source, name), os.path.join(destination, name))
-                copied.append(os.path.join("outputs", variant, outfit, name))
-    return copied
+    extensions_map: ClassVar[Dict[str, str]] = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        **CONTENT_TYPES,
+    }
+
+    def end_headers(self) -> None:
+        # Deploys overwrite assets in place; never let a browser cache an old GLB.
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
+
+    def log_message(self, fmt: str, *args) -> None:
+        sys.stderr.write(f"  {self.address_string()} {fmt % args}\n")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def serve(directory: str, port: int, bind: str) -> None:
+    handler = functools.partial(StudioHandler, directory=directory)
+    with ThreadedServer((bind, port), handler) as httpd:
+        print(f"serving {directory} on http://{bind}:{port}/")
+        print("  ctrl-c to stop")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nstopped")
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=8099)
-    parser.add_argument("--outfit", default="jacket_urban_01")
     parser.add_argument("--bind", default="0.0.0.0")
-    parser.add_argument("--build-only", action="store_true")
+    parser.add_argument("--out", default=os.path.join(REPO_ROOT, "docs"), help="staging directory")
+    parser.add_argument("--outputs-root", default=os.path.join(REPO_ROOT, "outputs"))
+    parser.add_argument(
+        "--no-build", action="store_true", help="serve without re-assembling the site"
+    )
     args = parser.parse_args(argv)
 
-    copied = build_site(args.outfit)
-    if not copied:
-        print(
-            f"no exported assets found under {OUTPUTS}; run the pipeline first "
-            f"(python tools/run_headless.py --variant male --outfit {args.outfit} --stage full)",
-            file=sys.stderr,
-        )
-    for rel in copied:
-        print("  ", rel)
-
-    if args.build_only:
-        print(f"site assembled at {SITE}")
-        return 0
-
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=SITE)
-    with http.server.ThreadingHTTPServer((args.bind, args.port), handler) as server:
-        print(f"serving {SITE} on http://{args.bind}:{args.port}/ (Ctrl+C to stop)")
+    if not args.no_build:
         try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
+            manifest = build_site.build(
+                args.out,
+                web_root=os.path.join(REPO_ROOT, "web_viewer"),
+                outputs_root=args.outputs_root,
+                assets_root=os.path.join(REPO_ROOT, "assets"),
+            )
+        except build_site.SiteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        outfits = ", ".join(outfit["id"] for outfit in manifest["outfits"])
+        print(f"site assembled at {args.out} ({len(manifest['outfits'])} outfit(s): {outfits})")
+
+    if not os.path.isdir(args.out):
+        print(f"error: {args.out} does not exist (drop --no-build to build it)", file=sys.stderr)
+        return 1
+
+    serve(args.out, args.port, args.bind)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
