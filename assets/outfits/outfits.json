@@ -1,6 +1,6 @@
 {
-  "schema_version": 3,
-  "description": "Outfit definitions consumed by the garment stage. Coverage values are fractions of body height measured from the top of the head (0.0) to the soles (1.0), which keeps one definition valid for both body variants. An outfit is either a single garment (coverage/sleeves at the top level) or a set of `pieces` - each with its own region, coverage, standoff, thickness and material - plus optional hard `details` (pouches, pads, buckles) anchored to body landmarks.",
+  "schema_version": 4,
+  "description": "Outfit definitions consumed by the garment stage. Coverage values are fractions of body height measured from the top of the head (0.0) to the soles (1.0), which keeps one definition valid for both body variants. An outfit is either a single garment (coverage/sleeves at the top level) or a set of `pieces` - each with its own region, coverage, standoff, thickness and material - plus optional hard `details`; `material.textures` may point at hand-authored maps (set `procedural.enabled: false` so a missing map fails instead of being generated) (pouches, pads, buckles) anchored to body landmarks.",
   "outfits": {
     "jacket_urban_01": {
       "display_name": "Urban Jacket 01",
@@ -473,6 +473,158 @@
           }
         }
       }
+    },
+    "tactical_tee_01": {
+      "display_name": "Tactical Tee 01",
+      "region": "UPPER_BODY",
+      "garment_type": "tshirt",
+      "fit": "regular",
+      "coverage": {
+        "top": 0.183,
+        "bottom": 0.462
+      },
+      "sleeves": {
+        "length": 0.28,
+        "cuff_inset": 0.92
+      },
+      "opening": "closed",
+      "opening_width": 0.0,
+      "offset": {
+        "default": 0.009,
+        "hem_extra": 0.004,
+        "collar_extra": 0.001,
+        "sleeve_extra": 0.003
+      },
+      "thickness": 0.0035,
+      "material": {
+        "name": "MAT_Cloth_tactical_tee_01",
+        "base_color": [
+          0.17,
+          0.185,
+          0.1,
+          1.0
+        ],
+        "roughness": 0.94,
+        "metallic": 0.0,
+        "normal_strength": 1.0,
+        "textures": {
+          "base_color": "assets/textures/tactical_tee_01/base_color.png",
+          "normal": "assets/textures/tactical_tee_01/normal.png",
+          "roughness": "assets/textures/tactical_tee_01/roughness.png",
+          "metallic": "assets/textures/tactical_tee_01/metallic.png"
+        },
+        "procedural": {
+          "enabled": false
+        }
+      },
+      "materials": {
+        "patch": {
+          "name": "MAT_Cloth_tactical_tee_01_patch",
+          "base_color": [
+            0.3,
+            0.19,
+            0.075,
+            1.0
+          ],
+          "roughness": 0.8,
+          "metallic": 0.0,
+          "normal_strength": 0.6,
+          "textures": {
+            "base_color": "assets/textures/tactical_tee_01/patch_base_color.png",
+            "normal": "assets/textures/tactical_tee_01/patch_normal.png",
+            "roughness": "assets/textures/tactical_tee_01/patch_roughness.png",
+            "metallic": "assets/textures/tactical_tee_01/patch_metallic.png"
+          },
+          "procedural": {
+            "enabled": false
+          }
+        }
+      },
+      "details": [
+        {
+          "id": "chest_patch",
+          "anchor": "chest",
+          "side": "center",
+          "face": "front",
+          "size": [
+            0.085,
+            0.012,
+            0.062
+          ],
+          "gap": 0.01,
+          "rounding": 0.1,
+          "material": "patch"
+        }
+      ]
+    },
+    "tactical_cargo_01": {
+      "display_name": "Tactical Cargo 01",
+      "region": "LOWER_BODY",
+      "garment_type": "trousers",
+      "fit": "regular",
+      "coverage": {
+        "top": 0.462,
+        "bottom": 0.925
+      },
+      "fit_mode": "shell",
+      "offset": {
+        "default": 0.014,
+        "hem_extra": 0.004
+      },
+      "thickness": 0.006,
+      "material": {
+        "name": "MAT_Cloth_tactical_cargo_01",
+        "base_color": [
+          0.42,
+          0.33,
+          0.175,
+          1.0
+        ],
+        "roughness": 0.88,
+        "metallic": 0.0,
+        "normal_strength": 1.0,
+        "textures": {
+          "base_color": "assets/textures/tactical_cargo_01/base_color.png",
+          "normal": "assets/textures/tactical_cargo_01/normal.png",
+          "roughness": "assets/textures/tactical_cargo_01/roughness.png",
+          "metallic": "assets/textures/tactical_cargo_01/metallic.png"
+        },
+        "procedural": {
+          "enabled": false
+        }
+      },
+      "details": [
+        {
+          "id": "cargo_pocket_left",
+          "anchor": "thigh",
+          "side": "left",
+          "face": "outer",
+          "size": [
+            0.085,
+            0.02,
+            0.15
+          ],
+          "gap": 0.006,
+          "rounding": 0.35,
+          "material": "main",
+          "z_offset": -0.095
+        },
+        {
+          "id": "cargo_pocket_right",
+          "anchor": "thigh",
+          "side": "right",
+          "face": "outer",
+          "size": [
+            0.085,
+            0.02,
+            0.15
+          ],
+          "gap": 0.006,
+          "rounding": 0.35,
+          "material": "main",
+          "z_offset": -0.095
+        }
+      ]
     }
   }
 }

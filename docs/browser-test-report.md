@@ -6,7 +6,7 @@ Generated 2026-11-12T15:40:28.014Z against `http://127.0.0.1:8123/Blender/` with
 
 | # | Scenario | Result | Time | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | mobile · shell renders from the manifest | pass | 4.1 s | 2 characters · 3 outfits · 3/3 validated |
+| 1 | mobile · shell renders from the manifest | pass | 4.1 s | 2 characters · 5 outfits · 5/5 validated |
 | 2 | mobile · GLB loads and renders | pass | 0.0 s | outputs/male/jacket_urban_01/jacket_urban_01_Modular.glb → 394×401 |
 | 3 | mobile · character switch without a reload | pass | 1.1 s | outputs/female/jacket_urban_01/jacket_urban_01_Modular.glb |
 | 4 | mobile · outfit library switches builds | pass | 1.3 s | jacket_urban_01 → parka_urban_01 |

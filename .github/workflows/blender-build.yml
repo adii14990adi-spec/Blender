@@ -123,6 +123,14 @@ jobs:
             outfit: tactical_loadout_01
           - variant: female
             outfit: tactical_loadout_01
+          - variant: male
+            outfit: tactical_tee_01
+          - variant: female
+            outfit: tactical_tee_01
+          - variant: male
+            outfit: tactical_cargo_01
+          - variant: female
+            outfit: tactical_cargo_01
     steps:
       - uses: actions/checkout@v4
         with:

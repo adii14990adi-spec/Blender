@@ -17,8 +17,12 @@ site/
 /docs/gltf-validation.jsonl
 
 # Procedurally generated PBR texture sets (deterministic, rebuilt by the
-# `uv_material` stage). Hand-authored reference maps stay tracked.
+# `uv_material` stage). Hand-authored reference maps stay tracked, and so do the
+# baked sets committed with an outfit (see tools/bake_textures.py) — re-include
+# their folders below.
 assets/textures/*/
+!assets/textures/tactical_tee_01/
+!assets/textures/tactical_cargo_01/
 
 # Node tooling (Khronos glTF Validator is installed by CI)
 node_modules/

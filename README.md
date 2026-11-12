@@ -16,12 +16,14 @@ Both body variants — `base_body_Male.blend` and `base_body_Female.blend` — a
 first-class. There is **no** `BASE_BODY.blend` assumption and no blockout-body
 path in production code.
 
-An outfit is either a single garment (`jacket_urban_01`, `parka_urban_01`) or a
-**multi-piece loadout** cut in the same pass — `tactical_loadout_01` is a combat
-tee, cargo trousers, duty belt and boots with eleven hard details (magazine
-pouches, buckle, knee pads, drop-leg holster, boot cuffs, chest patch), joined
-into one skinned, six-material GLB. See
-[Multi-piece outfits](docs/PIPELINE.md#multi-piece-outfits).
+The catalogue has five outfits for both body variants: two jackets
+(`jacket_urban_01`, `parka_urban_01`), two **tactical separates** —
+`tactical_tee_01` (combat tee + chest patch) and `tactical_cargo_01` (cargo
+trousers with thigh pockets) — and `tactical_loadout_01`, a **multi-piece
+loadout** (tee, cargo, duty belt, boots and eleven hard details) joined into one
+skinned, six-material GLB. See
+[Multi-piece outfits](docs/PIPELINE.md#multi-piece-outfits) and
+[Bring your own textures](docs/PIPELINE.md#bring-your-own-textures).
 
 ## Current status
 
@@ -53,6 +55,17 @@ warnings):
 | Min clearance / penetrating vertices | 0.2 mm / 0 | 0.4 mm / 0 |
 | GLB size | 2.9 MB | 3.0 MB |
 
+Tactical separates — committed texture sets, `"procedural": {"enabled": false}`:
+
+| Check | `tactical_tee_01` male / female | `tactical_cargo_01` male / female |
+| --- | --- | --- |
+| All 5 stages | PASS / PASS | PASS / PASS |
+| Materials / packed maps | 2 / 6 | 1 / 3 |
+| Triangles | 5 084 / 5 856 | 4 692 / 4 388 |
+| Texture provenance | all `existing` | all `existing` |
+| Khronos errors / warnings | 0 / 0 | 0 / 0 |
+| GLB size | 577 / 635 KB | 1.4 MB / 1.4 MB |
+
 What the pipeline does *not* do is documented in
 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — read it before promising a
 tailored coat.
@@ -73,7 +86,7 @@ tests/unit/            pure-Python tests (no Blender)
 tests/integration/     real pipeline runs inside Blender 5.0
 tools/                 run_headless.py, validate_exports.py, build_report.py,
                        build_site.py, render_previews.py, serve_viewer.py,
-                       browser_test.mjs, gltf_validate.js
+                       bake_textures.py, browser_test.mjs, gltf_validate.js
 web_viewer/            the 3D studio frontend (index.html, css/, js/, vendored model-viewer)
 docs/                  pipeline reference, limitations, build report + the assembled
                        Pages site (index.html, manifest.json, outputs/) at deploy time
@@ -160,7 +173,7 @@ rejected explicitly. A build that cannot produce a valid asset fails.
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci.yml` | PR, push to `main`, manual | `lint` (ruff check + format) · `unit` (pure Python) · `assets` (both bodies are real `.blend` files) · `pipeline` (matrix: male **and** female, real Blender 5.0, exports validated + Khronos) · `bpy-tests` (`pytest tests`, real pipeline) · `gate` (fails if any job did not succeed) |
-| `blender-build.yml` | push to `main`, PR, manual | `changes` (frontend-only pushes skip Blender and reuse cached exports; PRs always run the full matrix) · `build` (matrix: 2 characters × 3 outfits, real Blender 5.0, validated exports + Khronos, rendered thumbnails) · `site` (assembles `docs/`, generates and path-validates `manifest.json`) · `webtest` (Chromium suite) · `deploy` (GitHub Pages, `main` only) |
+| `blender-build.yml` | push to `main`, PR, manual | `changes` (frontend-only pushes skip Blender and reuse cached exports; PRs always run the full matrix) · `build` (matrix: 2 characters × 5 outfits, real Blender 5.0, validated exports + Khronos, rendered thumbnails) · `site` (assembles `docs/`, generates and path-validates `manifest.json`) · `webtest` (Chromium suite) · `deploy` (GitHub Pages, `main` only) |
 
 The PR gate fails when a base body is missing or a Git-LFS pointer — it never
 skips itself green.
@@ -173,8 +186,8 @@ throughout, so it works from a project subpath. It ships
 
 - a male/female character switch that swaps GLBs without a reload,
 - an outfit library generated from `manifest.json` (currently
-  `jacket_urban_01`, `parka_urban_01` and `tactical_loadout_01`, each for both
-  characters),
+  `jacket_urban_01`, `parka_urban_01`, `tactical_tee_01`, `tactical_cargo_01`
+  and `tactical_loadout_01`, each for both characters),
 - GLB/FBX downloads with real sizes, plus per-stage validation status,
 - fullscreen, camera presets, auto-rotate and animation transport when clips
   exist.

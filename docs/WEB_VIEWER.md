@@ -123,7 +123,7 @@ server — `model-viewer` cannot fetch a GLB over `file://`.
    Blender matrix is skipped and the last validated exports are restored from the
    Actions cache (key `assets-v1-*`). Pull requests always run the full matrix —
    a PR is the gate for the pipeline, not just for the page.
-2. **build** — matrix of `<male|female> × <jacket_urban_01|parka_urban_01|tactical_loadout_01>`:
+2. **build** — matrix of `<male|female> × <jacket_urban_01|parka_urban_01|tactical_loadout_01|tactical_tee_01|tactical_cargo_01>`:
    run the pipeline with real Blender 5.0, validate GLB/FBX (project inspectors +
    Khronos), render the thumbnail, upload the shippable files.
 3. **site** — assembles `docs/` (`tools/build_site.py`), refreshes

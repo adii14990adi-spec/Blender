@@ -1,0 +1,27 @@
+{
+  "cells": 300,
+  "detail_resolution": 512,
+  "encode": "linear",
+  "generator": "tools/bake_textures.py",
+  "metallic": 0.0,
+  "mode": "synthesised",
+  "normal_strength": 0.16,
+  "outfit": "tactical_cargo_01",
+  "palette_linear": [
+    0.42,
+    0.33,
+    0.175
+  ],
+  "resolution": 1024,
+  "roughness": 0.88,
+  "seed": 7,
+  "slots": {
+    "base_color": "assets/textures/tactical_cargo_01/base_color.png",
+    "metallic": "assets/textures/tactical_cargo_01/metallic.png",
+    "normal": "assets/textures/tactical_cargo_01/normal.png",
+    "roughness": "assets/textures/tactical_cargo_01/roughness.png"
+  },
+  "source": null,
+  "tileable": true,
+  "weave": "ripstop"
+}

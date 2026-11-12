@@ -31,7 +31,11 @@ from .paths import ensure_dir
 logger = get_logger("utils.textures")
 
 SLOTS = ("base_color", "normal", "roughness", "metallic")
-MIN_VALID_IMAGE_BYTES = 512
+# A PNG can legitimately be tiny — a constant metallic map at 256² compresses to
+# a couple of hundred bytes — so this only rejects files that cannot possibly be
+# an image (a Git-LFS pointer, an empty placeholder). bpy then validates the
+# pixels, which is the real check.
+MIN_VALID_IMAGE_BYTES = 64
 
 
 def _is_usable_image(path: str) -> bool:
