@@ -57,6 +57,83 @@ body's, or raise `p99_distortion`/`max_distortion` deliberately.
 checkpoint signature: a parameter only changes the stage that consumes it, so an
 upstream checkpoint stays valid and the affected stage simply rebuilds.
 
+## Multi-piece outfits
+
+An outfit is either one garment (`jacket_urban_01`, `parka_urban_01`) or a
+**loadout** built from several pieces in a single pass
+(`tactical_loadout_01`: tee + cargo trousers + duty belt + boots, plus eleven
+hard details). The schema lives in `assets/outfits/outfits.json` and is
+versioned (`schema_version: 3`); an outfit without a `pieces` key keeps working
+exactly as before — it resolves to one piece called `main` with the old
+material names and texture paths, which is what keeps the historical builds
+byte-comparable.
+
+```json
+{
+  "display_name": "Tactical Loadout 01",
+  "region": "MULTI",
+  "garment_type": "loadout",
+  "defaults": { "offset": { "default": 0.011, "hem_extra": 0.006 }, "thickness": 0.005 },
+  "pieces": {
+    "tee":   { "region": "UPPER_BODY", "coverage": { "top": 0.183, "bottom": 0.462 },
+               "sleeves": { "length": 0.28, "cuff_inset": 0.92 },
+               "opening": "closed", "thickness": 0.0035,
+               "material": { "name": "MAT_Cloth_tactical_tee", "…": "…" } },
+    "cargo": { "region": "LOWER_BODY", "coverage": { "top": 0.462, "bottom": 0.925 },
+               "fit_mode": "shell", "offset": { "default": 0.012 } },
+    "boots": { "region": "FOOTWEAR", "coverage": { "top": 0.885, "bottom": 0.997 },
+               "fit_mode": "shell" }
+  },
+  "materials": { "gear": { "name": "MAT_Cloth_tactical_gear", "…": "…" } },
+  "details": [
+    { "id": "pouch_left", "anchor": "waist", "side": "left", "face": "outer",
+      "size": [0.075, 0.052, 0.115], "gap": 0.018, "z_offset": -0.018,
+      "rounding": 0.22, "material": "gear" }
+  ]
+}
+```
+
+Piece fields (all optional except `region`):
+
+| Field | Meaning |
+| --- | --- |
+| `region` | `UPPER_BODY`, `LOWER_BODY`, `ACCESSORY` or `FOOTWEAR` — decides which body bands and cuts apply. |
+| `coverage` | `{top, bottom}` as a fraction of body height from the head down (0 = head, 1 = feet). |
+| `sleeves` | `{length, cuff_inset}` for the sleeve bisect (omit for a piece with no sleeves, e.g. trousers or boots). |
+| `opening` | `front` cuts a vertical strip out of the chest (the jackets); `closed` (default) leaves the panel whole, which is what the tee uses. |
+| `offset` | Standoff ramp (`default` + `hem_extra` / `collar_extra` / `sleeve_extra`). |
+| `thickness` | Solidify thickness applied after the fit. |
+| `fit_mode` | `surface` (re-project onto the body) or `shell` (measure only — used where a leg/arm tube cannot be re-projected without collapsing). |
+| `fit_params` | `iterations` / `relax_iterations` overrides for `surface` pieces. |
+| `material` | One material per piece: `name`, `base_color`, `roughness`, `metallic`, `normal_strength`, `textures{base_color,normal,roughness,metallic}`, optional `procedural` settings. Texture paths default to `<texture_dir>/<piece>_<slot>.png`. |
+
+Detail fields: `id`, `anchor` (`waist`, `hip`, `knee`, `chest`, `ankle`, …),
+`side` (`left`/`right`/`center`/`both`), `face` (`front`/`back`/`outer`),
+`size` (w, d, h in metres), `gap` (standoff off the surface),
+`z_offset`, `x_range` (fraction of the half-span, mirrored on the right side),
+`rounding` (bevel), `tilt_deg` and `material` (a piece key or a standalone
+top-level `materials` entry). Placement uses the **real surface normal** from a
+nearest-point query with the vertical component removed, so an off-centre anchor
+(a pouch on one hip) never tilts sideways.
+
+What the stages do with a loadout:
+
+* **shell** cuts every piece in one pass (`CLOTH_Shell`, then
+  `CLOTH_Shell__<piece>`), builds each detail as a beveled box
+  (`CLOTH_Detail__<id>`), and records the plan in the object's custom properties.
+* **shrinkwrap** fits each piece with its own parameters, `shell`-mode pieces
+  are measured only (and report `skipped_projection`), then everything is joined
+  into one `CLOTH_Shell` with one material slot per piece/detail material — the
+  rest of the pipeline (weights, UVs, export) is unchanged.
+* **uv_material** keeps the slot order from the join and builds one textured
+  material per slot, generating a per-piece texture set only when the files are
+  missing. Near-black webbing fails the texture-variance gate, so those palettes
+  carry a deliberately raised base colour (brighten it in
+  `assets/outfits/outfits.json` and delete `assets/textures/<outfit>/` to
+  regenerate).
+* **export** writes the same single skinned GLB/FBX: six materials, 18 packed
+  maps, 15 792 triangles (male) / 16 008 (female) and a 2.9 MB GLB.
+
 ## Stage 0 — `shell`
 
 Cuts a garment panel out of the body itself, then offsets it off the surface.
@@ -73,6 +150,11 @@ Cuts a garment panel out of the body itself, then offsets it off the surface.
 * Tags hem, collar and cuff vertices in the `UN_SHRINK` helper group (a 4 mm
   band) so the fit cannot pull the edges in. The group is a helper only — it is
   never a deform influence.
+
+For a loadout the same bisects run once per piece against that piece's region
+and coverage; details are appended afterwards as separate objects. Nothing is
+merged here — merging is the shrinkwrap stage's job, so each piece can be fitted
+with its own parameters first.
 
 **Gate:** garment face count ≥ `MIN_GARMENT_FACES` and *different* from the
 body's face count (a copy of the body is not a garment).
@@ -97,6 +179,12 @@ thickness.
   normals, then Solidify (`offset=1.0`, `use_even_offset=False`, `use_rim`) so
   the fitted surface stays the *outer* one. Sliver faces are dissolved and the
   result is kept only if the shell stays closed.
+
+With several pieces the stage dispatches per piece: `surface` pieces are
+projected as above, `shell` pieces are only measured (min/mean/max clearance
+against the body) and keep the offset the shell stage gave them, because
+projecting a closed leg tube onto the legs collapses it. Every piece is then
+joined into `CLOTH_Shell` with its material slots preserved.
 
 **Gates:** watertight (`boundary_edges == 0`, `non_manifold_edges == 0`),
 positive volume, `min_clearance > 0`, no penetrating vertices, max edge
@@ -171,4 +259,6 @@ exported as if it were new. `--stage full` clears the index first.
 
 `--stage validate` runs `preflight`, `weights_check`, `topology_check`,
 `uv_check` and `export_check` against the newest checkpoint without writing a
-new one. It is the PR gate.
+new one. It is the PR gate. `uv_check` walks **every** material slot (a
+loadout has six), so a piece whose texture graph is broken fails even when the
+first slot is fine.

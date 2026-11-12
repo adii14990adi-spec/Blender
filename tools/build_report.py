@@ -142,6 +142,22 @@ def summarise(run: Dict[str, Any]) -> Dict[str, Any]:
             "uv_layers": fbx.get("stats", {}).get("uv_layers"),
             "bytes": fbx.get("stats", {}).get("file_size_bytes"),
         },
+        "pieces": [
+            {
+                "key": piece.get("key"),
+                "region": piece.get("region"),
+                "fit_mode": piece.get("fit_mode") or (piece.get("fit") or {}).get("fit_mode"),
+                "faces": (piece.get("shell") or {}).get("face_count"),
+                "min_clearance_m": (piece.get("fit") or {}).get("min_clearance"),
+                "penetrating": (piece.get("fit") or {}).get("penetrating_vertices"),
+                "watertight": (piece.get("shell") or {}).get("boundary_edges") == 0
+                and (piece.get("shell") or {}).get("non_manifold_edges") == 0,
+            }
+            for piece in fit.get("pieces") or []
+        ],
+        "detail_count": len(shell.get("details") or []),
+        "material_count": material.get("material_count") or 1,
+        "material_names": [entry.get("name") for entry in material.get("materials") or []],
         "artifacts": {
             kind: (
                 os.path.relpath(path, REPO_ROOT)
@@ -198,6 +214,32 @@ def to_markdown(summaries: List[Dict[str, Any]], generated: str) -> str:  # noqa
         lines.append(f"| Degenerate faces | {_fmt(garment['degenerate_faces'])} |")
         lines.append("")
 
+        pieces = summary.get("pieces") or []
+        if pieces:
+            lines.append(
+                f"Multi-piece outfit — {len(pieces)} pieces, "
+                f"{summary.get('detail_count', 0)} hard details, "
+                f"{summary.get('material_count', 1)} materials"
+            )
+            lines.append("")
+            lines.append(
+                "| Piece | Region | Fit mode | Faces | Min clearance | Penetrating | Watertight |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+            for piece in pieces:
+                lines.append(
+                    f"| `{piece['key']}` | {_fmt(piece['region'])} | "
+                    f"{_fmt(piece['fit_mode'])} | {_fmt(piece['faces'])} | "
+                    f"{_fmt(piece['min_clearance_m'], 4)} m | {_fmt(piece['penetrating'])} | "
+                    f"{_fmt(piece['watertight'])} |"
+                )
+            lines.append("")
+            if summary.get("material_names"):
+                lines.append(
+                    "Materials: " + ", ".join(f"`{name}`" for name in summary["material_names"])
+                )
+                lines.append("")
+
         fit = summary["fit"]
         lines.append("| Fit | Value |")
         lines.append("| --- | --- |")
@@ -234,6 +276,7 @@ def to_markdown(summaries: List[Dict[str, Any]], generated: str) -> str:  # noqa
         lines.append(f"| Unwrap method | {_fmt(uv['method'])} |")
         lines.append(f"| UV coverage | {_fmt(uv['coverage'])} |")
         lines.append(f"| Degenerate UV faces | {_fmt(uv['degenerate_faces'])} |")
+        lines.append(f"| Material slots | {_fmt(summary.get('material_count', 1))} |")
         texture_ok = summary["textures"]["ok"]
         lines.append(f"| Texture set valid | {_fmt(texture_ok)} |")
         for slot, data in summary["textures"]["slots"].items():

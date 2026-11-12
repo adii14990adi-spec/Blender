@@ -217,6 +217,57 @@ DEFAULT_OUTFIT_SETTINGS: Dict[str, Any] = {
 }
 
 
+# Regions a garment piece can be cut from. ``UPPER_BODY`` adds the sleeve and
+# collar logic; the others are vertical bands of the body surface.
+PIECE_REGIONS = ("UPPER_BODY", "LOWER_BODY", "FOOTWEAR", "ACCESSORY")
+
+# Keys a piece inherits from the outfit when it does not override them.
+_PIECE_INHERITED = (
+    "region",
+    "coverage",
+    "sleeves",
+    "opening",
+    "opening_width",
+    "offset",
+    "thickness",
+    "fit",
+)
+
+TEXTURE_SLOTS = ("base_color", "normal", "roughness", "metallic")
+TEXTURE_FILENAMES = {
+    "base_color": "basecolor.png",
+    "normal": "normal.png",
+    "roughness": "roughness.png",
+    "metallic": "metallic.png",
+}
+
+
+def material_spec(
+    material: Dict[str, Any],
+    outfit: str,
+    key: str,
+    textures_dir: str = "assets/textures",
+) -> Dict[str, Any]:
+    """Fill a piece material's name and texture paths.
+
+    A piece may declare only a colour; the texture paths then follow the
+    convention ``assets/textures/<outfit>/<piece>_<slot>.png`` (the single-piece
+    outfit keeps the historical ``…/<slot>.png`` names).
+    """
+    spec = dict(material or {})
+    default_name = f"MAT_Cloth_{outfit}" if key == "main" else f"MAT_Cloth_{outfit}_{key}"
+    spec.setdefault("name", default_name)
+    if not spec.get("name"):
+        spec["name"] = default_name
+    textures = dict(spec.get("textures") or {})
+    prefix = "" if key == "main" else f"{key}_"
+    for slot in TEXTURE_SLOTS:
+        if not textures.get(slot):
+            textures[slot] = f"{textures_dir}/{outfit}/{prefix}{TEXTURE_FILENAMES[slot]}"
+    spec["textures"] = {slot: textures[slot] for slot in TEXTURE_SLOTS}
+    return spec
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
     for key, value in (override or {}).items():
@@ -243,6 +294,123 @@ def load_outfit(name: str, path: str | None = None) -> Dict[str, Any]:
     if not material.get("name"):
         material["name"] = f"MAT_Cloth_{name}"
     return settings
+
+
+def outfit_pieces(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the ordered piece list for an outfit.
+
+    Outfits without a ``pieces`` mapping keep the pre-existing single-garment
+    behaviour: exactly one piece called ``main`` that inherits every outfit-level
+    setting, so old definitions and their exports are unchanged.
+    """
+    outfit = str(settings.get("id") or "outfit")
+    pieces = settings.get("pieces") or {}
+    if not pieces:
+        piece = {key: settings.get(key) for key in _PIECE_INHERITED}
+        piece.update(
+            {
+                "key": "main",
+                "label": str(settings.get("display_name") or "Garment"),
+                "garment_type": settings.get("garment_type"),
+                "material": material_spec(settings.get("material") or {}, outfit, "main"),
+                "legacy_single_piece": True,
+            }
+        )
+        return [piece]
+
+    inherited = {key: settings.get(key) for key in _PIECE_INHERITED}
+    shared = settings.get("defaults") or {}
+    inherited = _deep_merge(inherited, shared)
+    resolved: List[Dict[str, Any]] = []
+    for key, raw in pieces.items():
+        if not isinstance(raw, dict):
+            raise ConfigError(f"outfit {outfit!r}: piece {key!r} must be an object")
+        piece = _deep_merge(inherited, raw)
+        region = str(piece.get("region") or "UPPER_BODY").upper()
+        if region not in PIECE_REGIONS:
+            raise ConfigError(
+                f"outfit {outfit!r}: piece {key!r} has region {region!r}; "
+                f"expected one of {', '.join(PIECE_REGIONS)}"
+            )
+        piece["region"] = region
+        piece["key"] = key
+        piece.setdefault("label", key.replace("_", " ").title())
+        piece["material"] = material_spec(piece.get("material") or {}, outfit, key)
+        resolved.append(piece)
+    return resolved
+
+
+DETAIL_ANCHORS = ("waist", "hip", "thigh", "knee", "calf", "ankle", "chest")
+
+
+def outfit_details(settings: Dict[str, Any], pieces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return the hard-detail (pouch, pad, buckle…) boxes for an outfit.
+
+    A detail's ``material`` may name another piece (``"belt"``) to share its
+    fabric, or carry its own material object.
+    """
+    outfit = str(settings.get("id") or "outfit")
+    by_key = {piece["key"]: piece for piece in pieces}
+    # A detail may also reference a standalone material declared under `materials`
+    # (webbing, hardware, rubber) that no garment piece uses.
+    for key, raw in (settings.get("materials") or {}).items():
+        by_key.setdefault(key, {"material": material_spec(raw or {}, outfit, key)})
+    resolved: List[Dict[str, Any]] = []
+    for index, raw in enumerate(settings.get("details") or []):
+        if not isinstance(raw, dict):
+            raise ConfigError(f"outfit {outfit!r}: detail #{index} must be an object")
+        anchor = str(raw.get("anchor") or "waist").lower()
+        if str(raw.get("face") or "front").lower() not in ("front", "back", "outer"):
+            raise ConfigError(
+                f"outfit {outfit!r}: detail {raw.get('id', index)!r} has face "
+                f"{raw.get('face')!r}; expected front, back or outer"
+            )
+        if anchor not in DETAIL_ANCHORS:
+            raise ConfigError(
+                f"outfit {outfit!r}: detail {raw.get('id', index)!r} has anchor {anchor!r}; "
+                f"expected one of {', '.join(DETAIL_ANCHORS)}"
+            )
+        if raw.get("x_range") and len(raw["x_range"]) != 2:
+            raise ConfigError(
+                f"outfit {outfit!r}: detail {raw.get('id', index)!r} `x_range` needs two values"
+            )
+        size = raw.get("size") or [0.1, 0.04, 0.06]
+        if len(size) != 3 or min(float(v) for v in size) <= 0:
+            raise ConfigError(
+                f"outfit {outfit!r}: detail {raw.get('id', index)!r} needs three positive "
+                f"`size` values (width, depth, height), got {size!r}"
+            )
+        key = str(raw.get("id") or f"detail_{index}")
+        material = raw.get("material") or "gear"
+        if isinstance(material, str):
+            source = by_key.get(material)
+            if source is None:
+                raise ConfigError(
+                    f"outfit {outfit!r}: detail {key!r} references unknown piece material "
+                    f"{material!r}; known pieces: {', '.join(sorted(by_key))}"
+                )
+            # Share the exact material (same texture set, one GLB material).
+            material = dict(source["material"])
+        else:
+            material = material_spec(material, outfit, key)
+        resolved.append(
+            {
+                "id": key,
+                "anchor": anchor,
+                "side": str(raw.get("side") or "center").lower(),
+                "face": str(raw.get("face") or "front").lower(),
+                "size": [float(v) for v in size],
+                "z_offset": float(raw.get("z_offset", 0.0)),
+                "gap": float(raw.get("gap", 0.016)),
+                "rounding": min(max(float(raw.get("rounding", 0.25)), 0.0), 0.49),
+                "tilt_deg": float(raw.get("tilt_deg", 0.0)),
+                "x_range": (
+                    [float(value) for value in raw["x_range"]] if raw.get("x_range") else None
+                ),
+                "material": material,
+            }
+        )
+    return resolved
 
 
 def axis_vector(axis: str) -> tuple[float, float, float]:

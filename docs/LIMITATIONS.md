@@ -12,12 +12,28 @@ body variants; nothing is speculation.
   hem is a horizontal cut, and there are no darts, pleats, gathers, lapels or
   collars. A tailored look needs a real pattern (sewn panels with seam lines)
   or a sculpted garment — both outside what this pipeline generates.
-* **Two outfits, both cut from the body.** `jacket_urban_01` (hip length) and
-  `parka_urban_01` (longer, roomier, heavier sleeve offset) are built from the
-  same panel logic; only `coverage`, `offsets`, `thickness` and `materials`
-  differ in `assets/outfits/outfits.json`. Any further outfit needs its own
-  tuning **and** its own clearance/distortion validation — the offsets do not
-  generalise for free.
+* **Three outfits, all cut from the body.** `jacket_urban_01` (hip length) and
+  `parka_urban_01` (longer, roomier, heavier sleeve offset) are single-piece
+  garments; `tactical_loadout_01` is a four-piece loadout (tee, cargo trousers,
+  duty belt, boots) cut in one pass. Every outfit uses the same panel logic and
+  differs only in `pieces`/`coverage`, `offsets`, `thickness` and `materials` in
+  `assets/outfits/outfits.json`. Any further outfit needs its own tuning **and**
+  its own clearance/distortion validation — the offsets do not generalise for
+  free.
+* **Hard details are beveled boxes, not modelled props.** Pouches, knee pads, a
+  belt buckle and a holster are rounded cuboids auto-placed on the body surface
+  (anchor + normal + standoff, optional `x_range` band). They read correctly at
+  asset distance and skin with the garment, but they have no straps, buckles,
+  stitching, zippers or openings, and they do not deform like leather or webbing.
+  Anything more specific belongs in an authored prop mesh.
+* **The lower body follows the legs exactly.** Trousers are a leg-surface cut
+  with a standoff, so there are no pleats, cargo folds, boot tucks or hem breaks;
+  the boots are a foot cut, which keeps the foot silhouette (a bare foot shape
+  painted black rather than a last-shaped boot). A real boot needs an imported
+  mesh, which the `garment_blend` path already supports.
+* **Details cannot be nested.** A pouch cannot sit on another pouch, and a detail
+  cannot be assigned to a piece other than by its anchor height — the anchor
+  (`waist`, `knee`, `chest`, `ankle`, …) selects the body band it attaches to.
 * **The GLBs contain the garment only.** No body mesh is exported, so the web
   studio shows the garment as a free-standing asset (the thumbnails render it on
   the mannequin because they are rendered from the `.blend`). That is deliberate:

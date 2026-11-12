@@ -306,10 +306,13 @@ async function main() {
           pill: document.querySelector('[data-role="build-pill"]').textContent.replace(/\s+/g, ' ').trim(),
         }));
         assertEqual(chrome.characters, 2, 'character buttons');
-        assertEqual(chrome.cards, 2, 'outfit cards');
+        assert(chrome.cards >= 2, `outfit cards (got ${chrome.cards})`);
         assertEqual(chrome.tabbar, 'grid', 'bottom tab bar visible on mobile');
         assertEqual(chrome.sidebar, 'none', 'sidebar hidden on mobile');
-        assert(/^2\/2 validated$/.test(chrome.pill), `build pill shows validation summary (got "${chrome.pill}")`);
+        assert(
+          /^\d+\/\d+ validated$/.test(chrome.pill),
+          `build pill shows validation summary (got "${chrome.pill}")`
+        );
         assert(state.manifest === undefined, 'manifest payload is not exposed in state');
         await waitForViewer(page, state.variant, state.outfitId);
         await shot(page, opts.shots, 'mobile-outfits');
@@ -366,7 +369,7 @@ async function main() {
       await runner.run('mobile · outfit library switches builds', async () => {
         const before = await page.evaluate(() => window.atelier.state.outfitId);
         const visibleCards = await page.$$('[data-panel-name="outfits"] .outfit-card');
-        assertEqual(visibleCards.length, 2, 'two outfit cards');
+        assert(visibleCards.length >= 2, `at least two outfit cards (got ${visibleCards.length})`);
         const target = await page.evaluate(() => {
           const cards = Array.from(document.querySelectorAll('[data-panel-name="outfits"] .outfit-card'));
           const other = cards.find((card) => card.dataset.outfit !== window.atelier.state.outfitId);

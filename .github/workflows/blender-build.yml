@@ -119,6 +119,10 @@ jobs:
             outfit: jacket_urban_01
           - variant: female
             outfit: parka_urban_01
+          - variant: male
+            outfit: tactical_loadout_01
+          - variant: female
+            outfit: tactical_loadout_01
     steps:
       - uses: actions/checkout@v4
         with:
@@ -265,7 +269,14 @@ jobs:
           MALE=outputs/male/jacket_urban_01/validation_report.json
           FEMALE=outputs/female/jacket_urban_01/validation_report.json
           if [ -f "${MALE}" ] && [ -f "${FEMALE}" ]; then
-            python tools/build_report.py --run "male=${MALE}" --run "female=${FEMALE}" \
+            RUNS=()
+            # Every built <variant>/<outfit> pair, so the report covers the
+            # single-garment outfits and the multi-piece loadout alike.
+            for report in outputs/*/*/validation_report.json; do
+              [ -f "${report}" ] || continue
+              RUNS+=(--run "run=${report}")
+            done
+            python tools/build_report.py "${RUNS[@]}" \
               --out docs/BUILD_REPORT.md --json docs/build_report.json
           else
             echo "::notice::validation reports missing - keeping the committed BUILD_REPORT.md"
